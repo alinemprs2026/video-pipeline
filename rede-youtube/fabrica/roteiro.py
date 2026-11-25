@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 
 # Estruturas de roteiro dos virais de saúde 60+: muito problema no começo, promessa de
@@ -143,16 +144,29 @@ def escrever(job: dict, banco=None) -> dict:
                            "but never name the product or promise results):\n" + n[0]["rules"])
         except Exception:
             pass
-    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        roteiro = _gemini(prompt)
-        roteiro["variant"] = variante
-        roteiro["writer"] = "gemini"
-        return roteiro
-    r = subprocess.run(["claude", "-p", prompt, "--output-format", "json", "--max-turns", "1"],
-                       capture_output=True, text=True, timeout=900)
-    if r.returncode != 0:
-        raise RuntimeError("Claude falhou: " + r.stderr[-400:])
-    saida = json.loads(r.stdout)
-    roteiro = _json(saida.get("result", ""))
+    # quem escreve é o CLAUDE (pedido da dona); o Gemini só entra se o Claude falhar ou a cota do plano acabar
+    erro_claude = ""
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        for _ in range(2):
+            try:
+                r = subprocess.run([shutil.which("claude") or "claude", "-p", "--output-format", "json", "--max-turns", "1"],
+                                   input=prompt, capture_output=True, text=True, timeout=900)
+                if r.returncode != 0:
+                    erro_claude = (r.stderr or r.stdout)[-300:]
+                    continue
+                saida = json.loads(r.stdout)
+                roteiro = _json(saida.get("result", ""))
+                palavras = sum(len(s["text"].split()) for s in roteiro.get("segments", []))
+                if palavras < 900:
+                    erro_claude = f"curto ({palavras} palavras)"
+                    prompt += f"\n\nIMPORTANT: your last draft had only {palavras} words. Write at least 980 words."
+                    continue
+                roteiro["variant"] = variante
+                roteiro["writer"] = "claude"
+                return roteiro
+            except Exception as e:
+                erro_claude = str(e)[:300]
+    roteiro = _gemini(prompt)
     roteiro["variant"] = variante
+    roteiro["writer"] = "gemini" + (f" (Claude falhou: {erro_claude[:120]})" if erro_claude else "")
     return roteiro
