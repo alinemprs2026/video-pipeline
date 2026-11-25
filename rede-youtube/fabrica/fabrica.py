@@ -130,12 +130,18 @@ def pixabay_videos(busca: str, pagina=1) -> list[dict]:
     return out
 
 
-BUSCA_NICHO = {"diabetes": "blood sugar glucose meter", "pulmao": "lungs breathing inhaler", "pele": "wrinkles aging skin",
-               "queda_capilar": "hair loss brush", "disfuncao": "prostate men health", "emagrecimento": "belly fat waist",
-               "neuropatia": "feet pain numbness", "memoria": "brain memory senior", "pressao": "blood pressure monitor"}
+# o que a foto grande da thumb TEM que mostrar (a IA confere)
+MOSTRA_NICHO = {"diabetes": "a blood sugar test or glucose meter", "pulmao": "human lungs or a person struggling to breathe",
+                "pele": "wrinkled or sagging aging skin on a face", "queda_capilar": "hair loss: hair falling out in a comb, brush or hand",
+                "disfuncao": "the prostate or male health (anatomy or an older man)", "emagrecimento": "belly fat or a tape measure on a waist",
+                "neuropatia": "feet in pain or a person holding their painful foot", "memoria": "the human brain",
+                "pressao": "a blood pressure monitor or measurement"}
+BUSCA_NICHO = {"diabetes": "blood sugar test finger", "pulmao": "lungs anatomy", "pele": "wrinkles face aging",
+               "queda_capilar": "hair loss comb", "disfuncao": "prostate anatomy", "emagrecimento": "belly fat measuring",
+               "neuropatia": "foot pain", "memoria": "brain glowing", "pressao": "blood pressure measurement"}
 
 
-def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | None = None) -> bool:
+def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | None = None, confere: str | None = None) -> bool:
     """Foto real e grátis do Pixabay (licença livre). Reserva quando a IA de imagem está sem cota."""
     r = requests.get("https://pixabay.com/api/", params={
         "key": os.environ["PIXABAY_KEY"], "q": busca[:100], "image_type": "photo", "per_page": 30,
@@ -144,6 +150,17 @@ def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | 
         return False
     hits = [h for h in r.json().get("hits", []) if not evitar or h["id"] not in evitar]
     if not hits:
+        return False
+    if confere:  # a IA confere se a foto mostra MESMO o assunto (na ordem de relevância da busca)
+        pergunta = (f"Does this photo clearly and directly show: {confere}? It must be a realistic photo that a viewer "
+                    "instantly recognizes as that, with no text, logo or watermark. "
+                    'Reply ONLY JSON: {"ok": true/false, "problems": []}')
+        for h in hits[:6]:
+            if evitar is not None:
+                evitar.add(h["id"])
+            if baixar(h.get("largeImageURL") or h["webformatURL"], destino) and revisar_imagem(destino, pergunta) is not False:
+                return True
+        destino.unlink(missing_ok=True)
         return False
     h = random.choice(hits[:10])
     if evitar is not None:
@@ -470,15 +487,18 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     if so_ia and not ok:
         return False  # refazendo com IA e a IA está sem cota: não troca nada
     ia_usada = ok
-    if not ok:  # IA sem cota: foto real do Pixabay
-        ok = pixabay_foto(busca or BUSCA_NICHO.get(nicho, "health senior"), img_path) or              pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
+    if not ok:  # IA sem cota: foto real do Pixabay — sem rosto, a foto grande mostra o PROBLEMA do nicho
+        ok = pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho)) \
+            or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
     if ok:
         foto = Image.open(img_path).convert("RGB")
         foto = ImageEnhance.Color(foto).enhance(1.45)
         foto = ImageEnhance.Contrast(foto).enhance(1.15)
         fundo = foto.resize((int(foto.width * 720 / foto.height), 720))
         x = max(0, (fundo.width - 720) // 2)
-        fundo = fundo.crop((x, 0, x + 720, 720)).filter(ImageFilter.GaussianBlur(3) if rosto else ImageFilter.BLUR)
+        fundo = fundo.crop((x, 0, x + 720, 720))
+        if rosto:
+            fundo = fundo.filter(ImageFilter.GaussianBlur(3))
         mascara = Image.new("L", (720, 720), 255)
         dm = ImageDraw.Draw(mascara)
         for i in range(260):  # funde com o fundo colorido à esquerda
@@ -509,6 +529,20 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
             ImageDraw.Draw(m).ellipse([0, 0, dia - 1, dia - 1], fill=255)
             cx, cy = 600, 455
             ImageDraw.Draw(base).ellipse([cx - 12, cy - 12, cx + dia + 12, cy + dia + 12], fill=(255, 230, 0))
+            base.paste(q, (cx, cy), m)
+
+    # 2b) SEM rosto: o ingrediente/solução do título numa bolinha grande (anel amarelo), embaixo à direita
+    if not (rosto and rosto.exists()):
+        ing = pasta / "thumb_ing.jpg"
+        if busca and pixabay_foto(busca, ing, confere=busca):
+            q = Image.open(ing).convert("RGB")
+            dia = 300
+            q = q.resize((int(q.width * dia / min(q.size)) + 1, int(q.height * dia / min(q.size)) + 1))
+            q = q.crop(((q.width - dia) // 2, (q.height - dia) // 2, (q.width - dia) // 2 + dia, (q.height - dia) // 2 + dia))
+            m = Image.new("L", (dia, dia), 0)
+            ImageDraw.Draw(m).ellipse([0, 0, dia - 1, dia - 1], fill=255)
+            cx, cy = 940, 390
+            ImageDraw.Draw(base).ellipse([cx - 14, cy - 14, cx + dia + 14, cy + dia + 14], fill=(255, 230, 0))
             base.paste(q, (cx, cy), m)
 
     # 3) palavras ENORMES à esquerda
@@ -720,7 +754,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
     capa = pasta / "thumb.jpg"
     rosto = None
     try:
-        rosto = rosto_da_persona(banco, job.get("channel_id", ""), pasta)
+        rosto = rosto_da_persona(banco, job.get("channel_id", ""), pasta, so_ia=True)
     except Exception as e:
         log("  rosto da persona falhou:", str(e)[:150])
     ia = thumb(roteiro.get("thumb_text") or job["title"], roteiro.get("thumb_highlight", ""),
@@ -748,15 +782,22 @@ def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
         try:
             r = job.get("script") or {}
             rosto = rosto_da_persona(banco, job["channel_id"], pasta, so_ia=True)
-            if not rosto:
-                log("  IA de imagem ainda sem cota — tento de novo mais tarde")
-                break
             capa = pasta / "thumb.jpg"
-            if not thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""),
-                         r.get("thumb_prompt") or "close-up of the health problem", capa, pasta, rosto=rosto,
-                         nicho=job["niche_key"], busca=r.get("thumb_query", ""), so_ia=True):
-                log("  IA de imagem sem cota para a foto do problema — paro aqui")
-                break
+            ia = bool(rosto) and thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""),
+                                       r.get("thumb_prompt") or "close-up of the health problem", capa, pasta, rosto=rosto,
+                                       nicho=job["niche_key"], busca=r.get("thumb_query", ""), so_ia=True)
+            if not ia:
+                # sem cota de IA: só troca se ainda está com a versão de rosto de banco (marca thumb_foto)
+                if banco.get("app_secrets", key=f"eq.thumb_foto:{job['id']}", select="key"):
+                    continue
+                thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""), "", capa, pasta, rosto=None,
+                      nicho=job["niche_key"], busca=r.get("thumb_query", ""))
+                youtube_do_canal(banco, job["channel_id"]).thumbnails().set(
+                    videoId=job["video_id"], media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
+                banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                             headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_foto:{job['id']}", "value": "ok"})
+                log(f"  thumb sem rosto aplicada (a de IA entra quando a cota voltar): {job['video_id']}")
+                continue
             youtube_do_canal(banco, job["channel_id"]).thumbnails().set(
                 videoId=job["video_id"], media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
             banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,

@@ -3,7 +3,7 @@
 name: thumbs
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "*/20 * * * *"
   workflow_dispatch: {}
 concurrency:
   group: thumbs
