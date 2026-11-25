@@ -636,30 +636,43 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     # 3) palavras ENORMES à esquerda
     d = ImageDraw.Draw(base)
     linhas = [l.strip() for l in texto.upper().split("|") if l.strip()][:5]
-    larg_max = 540 if rosto else 660
-    tams, fontes = [], []
-    for l in linhas:
-        tam = 150 if len(linhas) <= 3 else 118
-        f = ImageFont.truetype(str(FONTE), tam)
-        while d.textlength(l, font=f) > larg_max and tam > 56:
-            tam -= 4
+    # mede o texto DE VERDADE (caixa da letra + contorno + tarja) e diminui até caber com folga — nunca corta letra
+    X0, LARG, TOPO, BASE_Y = 36, 560 if not rosto else 520, 24, 696
+    TRACO, PAD_TARJA = 7, 14
+
+    def medir(tamanhos):
+        caixas = []
+        for l, tam in zip(linhas, tamanhos):
             f = ImageFont.truetype(str(FONTE), tam)
-        tams.append(tam)
-        fontes.append(f)
-    esp = 22
-    altura = sum(tams) + esp * (len(linhas) - 1) + 24
-    y = max(20, (720 - altura) // 2 - (40 if rosto else 0))
+            x0, y0, x1, y1 = d.textbbox((0, 0), l, font=f, stroke_width=TRACO)
+            caixas.append((f, x0, y0, x1, y1))
+        return caixas
+
+    tamanhos = [150 if len(linhas) <= 3 else 118] * len(linhas)
+    for _ in range(120):
+        caixas = medir(tamanhos)
+        larg_ok = all((x1 - x0) + 2 * PAD_TARJA <= LARG for _, x0, _, x1, _ in caixas)
+        alt_total = sum((y1 - y0) + 2 * PAD_TARJA for *_, y0, _, y1 in [(c[0], c[1], c[2], c[3], c[4]) for c in caixas]) \
+            + 14 * (len(linhas) - 1)
+        if larg_ok and alt_total <= BASE_Y - TOPO:
+            break
+        tamanhos = [max(40, t - 4) if ((c[3] - c[1]) + 2 * PAD_TARJA > LARG or alt_total > BASE_Y - TOPO) else t
+                    for t, c in zip(tamanhos, caixas)]
+    caixas = medir(tamanhos)
+    alt_total = sum((c[4] - c[2]) + 2 * PAD_TARJA for c in caixas) + 14 * (len(linhas) - 1)
+    y = TOPO + max(0, ((BASE_Y - TOPO) - alt_total) // 2)
     cores = [(255, 230, 0), (255, 255, 255)]
-    for k, (l, f, tam) in enumerate(zip(linhas, fontes, tams)):
+    for k, (l, (f, bx0, by0, bx1, by1)) in enumerate(zip(linhas, caixas)):
+        topo_linha = y + PAD_TARJA
+        ox, oy = X0 + PAD_TARJA - bx0, topo_linha - by0  # posiciona pela caixa real da letra
         if destaque and destaque.upper() in l:
-            x0, y0, x1, y1 = d.textbbox((40, y), l, font=f)
-            d.rectangle([x0 - 14, y0 - 12, x1 + 14, y1 + 12], fill=(230, 20, 20), outline=(255, 255, 255), width=5)
-            d.text((40, y), l, font=f, fill=(255, 255, 255))
-            y += 24
+            d.rectangle([X0, y, X0 + (bx1 - bx0) + 2 * PAD_TARJA, y + (by1 - by0) + 2 * PAD_TARJA],
+                        fill=(230, 20, 20), outline=(255, 255, 255), width=5)
+            d.text((ox, oy), l, font=f, fill=(255, 255, 255))
         else:
-            d.text((46, y + 6), l, font=f, fill=(0, 0, 0))  # sombra
-            d.text((40, y), l, font=f, fill=cores[k % 2], stroke_width=7, stroke_fill=(0, 0, 0))
-        y += tam + esp
+            d.text((ox + 6, oy + 6), l, font=f, fill=(0, 0, 0))  # sombra
+            d.text((ox, oy), l, font=f, fill=cores[k % 2], stroke_width=TRACO, stroke_fill=(0, 0, 0))
+        y += (by1 - by0) + 2 * PAD_TARJA + 14
     base.save(saida, "JPEG", quality=93)
     return ia_usada
 
