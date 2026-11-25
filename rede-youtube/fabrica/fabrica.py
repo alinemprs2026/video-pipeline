@@ -924,7 +924,11 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                     usados.add(c["id"])
                     mp4 = pasta / f"px_{c['id']}.mp4"
                     if mp4.exists() or baixar(c["url"], mp4):
-                        clip_de_video(mp4, cena_dur, saida, inicio=random.uniform(0, max(0, c["dur"] - cena_dur - 0.5)), efeito=efeito, visual=visual)
+                        try:
+                            clip_de_video(mp4, cena_dur, saida, inicio=random.uniform(0, max(0, c["dur"] - cena_dur - 0.5)), efeito=efeito, visual=visual)
+                        except RuntimeError as e:  # clipe com formato estranho: pula para o próximo (não derruba o vídeo)
+                            log("  clipe ignorado (ffmpeg não conseguiu cortar):", c["id"], str(e)[-80:])
+                            continue
                         feito = True
                         break
             if not feito:  # último recurso: repete uma cena anterior ou um fundo escuro
