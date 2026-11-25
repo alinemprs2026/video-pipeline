@@ -127,8 +127,49 @@ def pixabay_videos(busca: str, pagina=1) -> list[dict]:
     for h in r.json().get("hits", []):
         v = h["videos"].get("large") or h["videos"].get("medium")
         if v and v.get("url") and v.get("width", 0) >= 1280:
-            out.append({"id": h["id"], "url": v["url"], "dur": h.get("duration", 0)})
+            miniatura = (h["videos"].get("small") or {}).get("thumbnail") or v.get("thumbnail") or ""
+            out.append({"id": h["id"], "url": v["url"], "dur": h.get("duration", 0), "thumb": miniatura,
+                        "tags": h.get("tags", "")})
     return out
+
+
+def escolher_relevantes(fala: str, busca: str, cands: list[dict]) -> list[dict] | None:
+    """A IA olha a miniatura de cada vídeo e devolve SÓ os que mostram o que está sendo dito (na ordem de melhor).
+    None = não deu para conferir (sem chave/cota): aí usa a ordem da busca, mas nunca vídeo sem relação aparente."""
+    chave = os.environ.get("GEMINI_API_KEY")
+    cands = [c for c in cands if c.get("thumb")][:6]
+    if not chave or not cands:
+        return None
+    partes = []
+    for k, c in enumerate(cands):
+        try:
+            img = requests.get(c["thumb"], timeout=20).content
+        except Exception:
+            continue
+        partes += [{"text": f"Clip {k}:"}, {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}}]
+    if not partes:
+        return None
+    partes.append({"text": (
+        f'Narration at this moment of a health video for seniors: "{fala[:400]}"\n'
+        f'Wanted B-roll: "{busca}".\n'
+        "Which clips VISUALLY show something directly related to what the narration says at this moment "
+        "(the same object, food, body part, symptom or situation)? Reject anything unrelated (pets, makeup, "
+        "random landscapes, sports, unrelated people) and anything childish or inappropriate. "
+        'Reply ONLY JSON: {"ok": [clip numbers, best first]}')})
+    corpo = {"contents": [{"parts": partes}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
+    for modelo in ("gemini-3.5-flash-lite", "gemini-3.5-flash"):
+        try:
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
+                              params={"key": chave}, json=corpo, timeout=90)
+            if r.status_code == 429:
+                continue
+            if not r.ok:
+                break
+            ok = json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"]).get("ok", [])
+            return [cands[i] for i in ok if isinstance(i, int) and 0 <= i < len(cands)]
+        except Exception:
+            break
+    return None
 
 
 # o que a foto grande da thumb TEM que mostrar (a IA confere)
@@ -662,6 +703,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
     blocos = roteiro["segments"]
     usados: set[int] = set()
     clipes, falas, legendas, destaques, ctas, cortes, t = [], [], [], [], [], [], 0.0
+    bons_do_bloco: dict[int, list] = {}  # vídeos de apoio aprovados pela IA, por trecho
     # voz primeiro: confere os 7 minutos ANTES de gastar tempo com cenas
     def narrar(vel):
         tot = 0.0
@@ -709,15 +751,24 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                     clip_de_imagem(png, cena_dur, saida, efeito)
                     feito = True
             if not feito:
-                buscas = [q for q in (vis.get("queries") or []) + [vis.get("query")] if q]
-                cand = []
-                for q in buscas:  # a mais específica primeiro; só cai na genérica se nada combinar
-                    cand = [c for c in pixabay_videos(q) if c["id"] not in usados]
-                    if cand:
-                        break
-                if not cand:
-                    cand = [c for c in pixabay_videos(roteiro.get("fallback_query", "elderly healthy lifestyle")) if c["id"] not in usados]
-                cand = cand[:4]  # os mais relevantes da busca (sem sortear entre resultados fracos)
+                if i not in bons_do_bloco:
+                    # uma vez por trecho: busca e a IA confere quais vídeos mostram o que está sendo dito
+                    buscas = [q for q in (vis.get("queries") or []) + [vis.get("query")] if q]
+                    bons = []
+                    for q in buscas:  # a mais específica primeiro
+                        cand = [c for c in pixabay_videos(q) if c["id"] not in usados]
+                        if not cand:
+                            continue
+                        escolhidos = escolher_relevantes(b["text"], q, cand)
+                        if escolhidos is None:  # sem conferência possível: só os 2 primeiros da busca específica
+                            escolhidos = cand[:2]
+                        bons += [c for c in escolhidos if c["id"] not in {x["id"] for x in bons}]
+                        if len(bons) >= n:
+                            break
+                    bons_do_bloco[i] = bons
+                    if not bons:
+                        log(f"  trecho {i + 1}: nenhum vídeo de apoio combinou — repito uma cena do próprio assunto")
+                cand = [c for c in bons_do_bloco[i] if c["id"] not in usados]
                 for c in cand[:3]:
                     usados.add(c["id"])
                     mp4 = pasta / f"px_{c['id']}.mp4"
@@ -1066,19 +1117,53 @@ def processar(banco: Banco, job: dict):
         shutil.rmtree(pasta, ignore_errors=True)
 
 
-def main():
-    banco = Banco()
+def publicar_devidos(banco: Banco) -> int:
+    """Publica NO MÁXIMO 1 vídeo vencido por vez. Se a nuvem atrasou e vários venceram juntos,
+    os outros ganham horários novos espaçados (nunca sai um monte de uma vez)."""
     agora = datetime.now(timezone.utc).isoformat()
-    for job in banco.get("yt_jobs", status="eq.aprovado", select="*", order="updated_at",
-                         **{"or": f"(published_at.is.null,published_at.lte.{agora})"}):
+    vencidos = banco.get("yt_jobs", status="eq.aprovado", select="*", order="published_at.nullsfirst",
+                         **{"or": f"(published_at.is.null,published_at.lte.{agora})"})
+    if not vencidos:
+        return 0
+    # respeita o intervalo desde a ÚLTIMA publicação real da rede
+    ult = banco.get("yt_jobs", status="eq.publicado", select="updated_at", order="updated_at.desc", limit="1")
+    if ult and datetime.now(timezone.utc) - datetime.fromisoformat(ult[0]["updated_at"]) < timedelta(minutes=INTERVALO_MIN[0]):
+        for j in vencidos:
+            banco.job(j["id"], published_at=reservar_horario(banco).isoformat())
+        log(f"  {len(vencidos)} vídeo(s) remarcados: a última publicação foi há menos de {INTERVALO_MIN[0]} min")
+        return 0
+    job, resto = vencidos[0], vencidos[1:]
+    for j in resto:
+        banco.job(j["id"], published_at=reservar_horario(banco).isoformat())
+    if resto:
+        log(f"  {len(resto)} vídeo(s) atrasados ganharam horários novos espaçados")
+    # "pega" o vídeo de forma atômica: duas máquinas nunca publicam (nem comentam) o mesmo vídeo
+    r = banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"id": f"eq.{job['id']}", "status": "eq.aprovado"},
+                      json={"status": "publicando"}, headers={"Prefer": "return=representation"}, timeout=60)
+    if not (r.ok and r.json()):
+        return 0
+    for tentativa in range(3):  # o YouTube às vezes dá erro 503 passageiro
         try:
             log("publicando", job["title"])
-            banco.job(job["id"], status="publicando")
             publicar(banco, job)
             marcar_publicado(banco, job)
+            return 1
+        except LinkErrado as e:
+            banco.job(job["id"], status="erro", error=f"link: {e}")
+            return 0
         except Exception as e:
-            banco.job(job["id"], status="erro", error=f"publicar: {str(e)[:500]}")
-            log("ERRO publicando:", e)
+            if tentativa == 2:
+                banco.job(job["id"], status="aprovado", published_at=reservar_horario(banco).isoformat(),
+                          error=f"publicar (vou tentar de novo): {str(e)[:300]}")
+                log("ERRO publicando:", e)
+            else:
+                time.sleep(20 * (tentativa + 1))
+    return 0
+
+
+def main():
+    banco = Banco()
+    publicar_devidos(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
@@ -1099,6 +1184,7 @@ def main():
             log("  bio não atualizada:", str(e)[:150])
         try:
             processar(banco, job)
+            publicar_devidos(banco)  # entre um vídeo e outro, publica o que venceu (1 por vez)
         except Exception as e:
             traceback.print_exc()
             banco.job(job["id"], status="erro", error=str(e)[:900])
@@ -1108,6 +1194,7 @@ def main():
 if __name__ == "__main__":
     if "--thumbs" in sys.argv:  # troca thumbs provisórias por thumbs 100% IA quando a cota voltar
         b = Banco()
+        publicar_devidos(b)  # redundância: se a fábrica estiver parada, este relógio também publica (1 por vez)
         # garante: vídeo substituto publicado => versão antiga privada (caso a máquina que publicou fosse anterior)
         for s_ in b.get("app_secrets", key="like.substituir:*", select="key,value"):
             j = b.get("yt_jobs", id=f"eq.{s_['key'].split(':', 1)[1]}", select="id,channel_id,status")
