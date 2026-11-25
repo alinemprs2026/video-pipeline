@@ -14,7 +14,7 @@ permissions:
 jobs:
   fabrica:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 340
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +29,8 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       KOKORO_DIR: ${{ github.workspace }}/.kokoro
-      MAX_POR_RODADA: "3"
+      MAX_POR_RODADA: "30"
+      MAQUINA: ${{ matrix.maquina }}
       PUBLICAR_DIRETO: "1"
       SEM_PROXY_PELO_SERVIDOR: "1"
       IMAGENS_NAS_CENAS: "0"

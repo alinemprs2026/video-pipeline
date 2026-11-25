@@ -21,7 +21,7 @@ VARIANTES = {
 REGRAS = """
 HARD RULES (YouTube policy + audience trust):
 - English, warm and simple, for people over 60. Short sentences. Talk to "you".
-- Between {palavras} and 1100 words of narration in total (the video must be 7 to 8 minutes). Count them: shorter scripts are rejected, much longer ones bore the viewer.
+- Between {palavras} and 980 words of narration in total (the video must be 7 to 8 minutes). Count them: shorter scripts are rejected, much longer ones bore the viewer.
 - Never promise a cure, never say it "reverses" or "cures" a disease, never tell people to stop medication.
   Use "may help", "supports", "many people notice". Add one short line: "Talk to your doctor before changing anything."
 - Do NOT claim to be a doctor. You are a health educator/narrator.
@@ -81,7 +81,7 @@ def montar_prompt(job: dict, variante: str, feedback: str | None, oferta: str) -
     p = [f"You write scripts for a faceless YouTube health channel for people over 60 (niche: {NICHOS_PT.get(job['niche_key'], job['niche_key'])}).",
          f'Video title (keep the promise exactly): "{job["title"]}"',
          "Style for this channel: " + VARIANTES[variante],
-         REGRAS.format(palavras=980, oferta=oferta)]
+         REGRAS.format(palavras=860, oferta=oferta)]
     if feedback:
         p.append("The channel owner reviewed the previous version and asked for these changes (follow them carefully): " + feedback)
         if job.get("script"):
@@ -123,7 +123,7 @@ def _gemini(prompt: str) -> dict:
             try:
                 roteiro = _json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
                 palavras = sum(len(s["text"].split()) for s in roteiro["segments"])
-                if palavras < 900:  # 7 min é LEI (a voz faz ~110 palavras/min): roteiro curto volta
+                if palavras < 780:  # 7 min é LEI (a voz faz ~110 palavras/min): roteiro curto volta
                     ultimo = f"{modelo} curto ({palavras} palavras)"
                     continue
                 return roteiro
@@ -157,9 +157,9 @@ def escrever(job: dict, banco=None) -> dict:
                 saida = json.loads(r.stdout)
                 roteiro = _json(saida.get("result", ""))
                 palavras = sum(len(s["text"].split()) for s in roteiro.get("segments", []))
-                if palavras < 900:
+                if palavras < 780:
                     erro_claude = f"curto ({palavras} palavras)"
-                    prompt += f"\n\nIMPORTANT: your last draft had only {palavras} words. Write at least 980 words."
+                    prompt += f"\n\nIMPORTANT: your last draft had only {palavras} words. Write at least 860 words."
                     continue
                 roteiro["variant"] = variante
                 roteiro["writer"] = "claude"

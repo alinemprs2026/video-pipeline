@@ -1027,7 +1027,7 @@ def sem_links(texto: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", texto).strip()
 
 
-INTERVALO_MIN = (8, 15)  # minutos entre uma publicação e outra na rede inteira (sorteado)
+INTERVALO_MIN = (5, 9)  # minutos entre uma publicação e outra na rede inteira (sorteado)
 
 
 def reservar_horario(banco: Banco) -> datetime:
@@ -1188,9 +1188,9 @@ def processar(banco: Banco, job: dict):
             except Exception as e:
                 log("  não apaguei a versão antiga:", str(e)[:100])
         direto = os.environ.get("PUBLICAR_DIRETO") == "1" and bool(link_do_job(banco, job))
-        horario = reservar_horario(banco) if direto else None
-        ja = direto and horario <= datetime.now(timezone.utc) + timedelta(minutes=2)
-        log("  subindo", "PÚBLICO" if ja else (f"PRIVADO, vira público às {horario:%H:%M} UTC" if direto else "não listado"), "...")
+        ja = direto and not banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1") and pode_publicar(banco)
+        horario = None if ja else (datetime.now(timezone.utc) if direto else None)
+        log("  subindo", "PÚBLICO" if ja else ("PRIVADO (pronto — sai na vez dele, 5-9 min após o anterior)" if direto else "não listado"), "...")
         vid = subir(banco, job, roteiro, video, capa, publico=ja, privado=direto and not ja)
         if direto and not ja:
             # espera o horário dele como PRIVADO (não é o agendamento do YouTube): a fábrica deixa público na hora
@@ -1213,26 +1213,21 @@ def processar(banco: Banco, job: dict):
         shutil.rmtree(pasta, ignore_errors=True)
 
 
-def publicar_devidos(banco: Banco) -> int:
-    """Publica NO MÁXIMO 1 vídeo vencido por vez. Se a nuvem atrasou e vários venceram juntos,
-    os outros ganham horários novos espaçados (nunca sai um monte de uma vez)."""
-    agora = datetime.now(timezone.utc).isoformat()
-    vencidos = banco.get("yt_jobs", status="eq.aprovado", select="*", order="published_at.nullsfirst",
-                         **{"or": f"(published_at.is.null,published_at.lte.{agora})"})
-    if not vencidos:
-        return 0
-    # respeita o intervalo desde a ÚLTIMA publicação real da rede
+def pode_publicar(banco: Banco) -> bool:
+    """Ritmo da rede: só publica se a última publicação foi há pelo menos 5-9 min (sorteado)."""
     ult = banco.get("yt_jobs", status="eq.publicado", select="updated_at", order="updated_at.desc", limit="1")
-    if ult and datetime.now(timezone.utc) - datetime.fromisoformat(ult[0]["updated_at"]) < timedelta(minutes=INTERVALO_MIN[0]):
-        for j in vencidos:
-            banco.job(j["id"], published_at=reservar_horario(banco).isoformat())
-        log(f"  {len(vencidos)} vídeo(s) remarcados: a última publicação foi há menos de {INTERVALO_MIN[0]} min")
+    if not ult:
+        return True
+    passado = datetime.now(timezone.utc) - datetime.fromisoformat(ult[0]["updated_at"])
+    return passado >= timedelta(minutes=random.uniform(*INTERVALO_MIN))
+
+
+def publicar_devidos(banco: Banco) -> int:
+    """Publica o vídeo PRONTO mais antigo, 1 por vez, respeitando o ritmo da rede (sem remarcar horários)."""
+    prontos = banco.get("yt_jobs", status="eq.aprovado", select="*", order="updated_at", limit="1")
+    if not prontos or not pode_publicar(banco):
         return 0
-    job, resto = vencidos[0], vencidos[1:]
-    for j in resto:
-        banco.job(j["id"], published_at=reservar_horario(banco).isoformat())
-    if resto:
-        log(f"  {len(resto)} vídeo(s) atrasados ganharam horários novos espaçados")
+    job = prontos[0]
     # "pega" o vídeo de forma atômica: duas máquinas nunca publicam (nem comentam) o mesmo vídeo
     r = banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"id": f"eq.{job['id']}", "status": "eq.aprovado"},
                       json={"status": "publicando"}, headers={"Prefer": "return=representation"}, timeout=60)
@@ -1290,6 +1285,11 @@ def main():
                 banco.job(job["id"], status="na_fila", error=f"vou tentar de novo: {msg[:300]}")
             else:
                 banco.job(job["id"], status="erro", error=msg[:900])
+    if os.environ.get("MAQUINA", "1") == "1":
+        fim = time.time() + 50 * 60
+        while time.time() < fim and banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
+            publicar_devidos(banco)
+            time.sleep(60)
     log("rodada terminada")
 
 
