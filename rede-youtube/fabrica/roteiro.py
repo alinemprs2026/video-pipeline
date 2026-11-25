@@ -57,6 +57,7 @@ Return ONLY valid JSON, no markdown:
   "thumb_text": "3 to 5 SHORT lines separated by |, max 4 words per line, e.g. ONLY 1 GLASS|BEFORE BED|SUGAR DROPS|BY MORNING",
   "thumb_highlight": "one line from thumb_text to put in the red box",
   "thumb_prompt": "photorealistic close-up showing the problem/ingredient dramatically, for the RIGHT half of a thumbnail",
+  "thumb_query": "2-3 word stock-photo search for that same problem/ingredient (e.g. coconut oil spoon, swollen feet)",
   "link_hook": "2-3 SHORT lines for the TOP of the description, right before the link. Speak straight to the SPECIFIC pain of THIS video (name the symptom, the fear, the frustration in the viewer's own words), then promise the missing piece is behind the link. Curiosity, urgency, no cure claims. Example for morning blood sugar: 'Still waking up with high sugar even when you ate nothing last night? 😟 That number is not your fault. I put the simple morning recipe that helps here 👇'",
   "comment": "pinned-style FIRST COMMENT, 3-5 short lines: agitate the exact pain of this video, show empathy, tell them the step-by-step recipe is in the link, and end with an easy question that invites replies (age, city, or how long they have had this problem). Emojis allowed (👇 ⚠️ ✅). No cure claims.",
   "fallback_query": "generic stock footage search for this niche"

@@ -130,6 +130,27 @@ def pixabay_videos(busca: str, pagina=1) -> list[dict]:
     return out
 
 
+BUSCA_NICHO = {"diabetes": "blood sugar glucose meter", "pulmao": "lungs breathing inhaler", "pele": "wrinkles aging skin",
+               "queda_capilar": "hair loss brush", "disfuncao": "prostate men health", "emagrecimento": "belly fat waist",
+               "neuropatia": "feet pain numbness", "memoria": "brain memory senior", "pressao": "blood pressure monitor"}
+
+
+def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | None = None) -> bool:
+    """Foto real e grátis do Pixabay (licença livre). Reserva quando a IA de imagem está sem cota."""
+    r = requests.get("https://pixabay.com/api/", params={
+        "key": os.environ["PIXABAY_KEY"], "q": busca[:100], "image_type": "photo", "per_page": 30,
+        "safesearch": "true", "orientation": "vertical" if pessoa else "horizontal", "min_width": 1000}, timeout=30)
+    if r.status_code != 200:
+        return False
+    hits = [h for h in r.json().get("hits", []) if not evitar or h["id"] not in evitar]
+    if not hits:
+        return False
+    h = random.choice(hits[:10])
+    if evitar is not None:
+        evitar.add(h["id"])
+    return baixar(h.get("largeImageURL") or h["webformatURL"], destino)
+
+
 def baixar(url, destino: Path):
     for espera in (0, 5, 15):
         time.sleep(espera)
@@ -360,7 +381,8 @@ def persona_do_canal(channel_id: str) -> dict:
 def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path) -> Path | None:
     """Recorte (fundo transparente) do rosto da persona do canal. Gera UMA vez, revisa, guarda e reaproveita."""
     destino = pasta / "persona.png"
-    nome = f"{channel_id}.png"
+    nome = f"{channel_id}.png"            # persona definitiva (IA)
+    provisoria = f"provisoria_{channel_id}.png"  # foto de banco enquanto a IA está sem cota
     if banco.baixar_arquivo("personas", nome, destino):
         return destino
     p = persona_do_canal(channel_id)
@@ -368,18 +390,54 @@ def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path) -> Path | Non
               "mouth slightly open, looking straight at the camera, entire head visible with space above the hair, "
               "plain light grey studio background, soft studio lighting, sharp focus, photorealistic, 85mm, no hands")
     bruto = pasta / "persona_bruto.png"
-    for _ in range(4):
+    for _ in range(2):
         if gerar_imagem_revisada(prompt, bruto, REVISAO_ROSTO, tentativas=1, premium=True, largura=1024, altura=1024):
             from rembg import new_session, remove
             from PIL import Image
             recorte = remove(Image.open(bruto).convert("RGB"), session=new_session("isnet-general-use"))
-            recorte = recorte.crop(recorte.getbbox())
+            recorte = so_cabeca_e_ombros(recorte.crop(recorte.getbbox()))
             recorte.save(destino)
             banco.guardar_arquivo("personas", nome, destino)
             log("  persona nova do canal criada e guardada")
             return destino
+    # reserva: retrato real do Pixabay, PROVISÓRIO (quando a IA voltar, a definitiva substitui)
+    if banco.baixar_arquivo("personas", provisoria, destino):
+        return destino
+    homem = p["voz"].startswith(("am_", "bm_"))
+    buscas = (["shocked senior man", "surprised old man face", "worried elderly man"] if homem
+              else ["shocked senior woman", "surprised old woman face", "worried elderly woman"])
+    vistos: set = set()
+    REVISAO_FOTO = ("Strict check for a YouTube health thumbnail. ok=true ONLY if ALL are true: exactly ONE person aged 55+; "
+                    "the whole head including the top of the hair is inside the frame; looking roughly at the camera; "
+                    "the expression is clearly SHOCKED, SURPRISED or WORRIED (not smiling); no hat, no sunglasses; "
+                    "NO hands or fingers anywhere near the face or head; plain everyday modern clothing (no costume); "
+                    "no text, logo or watermark; realistic photo (not illustration). "
+                    'Reply ONLY JSON: {"ok": true/false, "problems": []}')
+    for k in range(9):
+        if pixabay_foto(buscas[k % 3], bruto, pessoa=True, evitar=vistos) and revisar_imagem(bruto, REVISAO_FOTO):
+            from rembg import new_session, remove
+            from PIL import Image
+            recorte = remove(Image.open(bruto).convert("RGB"), session=new_session("isnet-general-use"))
+            recorte = so_cabeca_e_ombros(recorte.crop(recorte.getbbox()))
+            recorte.save(destino)
+            banco.guardar_arquivo("personas", provisoria, destino)
+            log("  persona provisória do canal criada com foto real (Pixabay)")
+            return destino
     log("  não consegui um rosto aprovado para a persona")
     return None
+
+
+def so_cabeca_e_ombros(img):
+    """Corta o recorte para cabeça + ombros (tira braços, mãos e corpo que sobram)."""
+    alfa = img.split()[3]
+    w, h = img.size
+    topo = alfa.crop((0, 0, w, max(1, int(h * 0.12)))).getbbox() or (0, 0, w, h)
+    cabeca = max(40, topo[2] - topo[0])
+    cx = (topo[0] + topo[2]) // 2
+    lado = min(w, int(cabeca * 2.0))
+    x0 = max(0, min(w - lado, cx - lado // 2))
+    out = img.crop((x0, 0, x0 + lado, min(h, int(cabeca * 2.1))))
+    return out.crop(out.getbbox() or (0, 0, *out.size))
 
 
 def _degrade(w, h, c1, c2):
@@ -394,7 +452,7 @@ def _degrade(w, h, c1, c2):
 
 
 def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
-          rosto: Path | None = None, nicho: str = ""):
+          rosto: Path | None = None, nicho: str = "", busca: str = ""):
     """Padrão dos virais de saúde: fundo de cor VIVA, palavras ENORMES à esquerda (uma em tarja vermelha),
     o problema em foto à direita e o ROSTO da persona do canal na frente, com contorno branco."""
     from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -404,7 +462,10 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     # 1) foto do problema: fundo da metade direita + bolinha em destaque (anel amarelo)
     img_path = pasta / "thumb_img.png"
     foto = None
-    if gerar_imagem_revisada(prompt_img + ", extreme close-up, dramatic, high contrast, " + ESTILO, img_path, tentativas=3, premium=True):
+    ok = gerar_imagem_revisada(prompt_img + ", extreme close-up, dramatic, high contrast, " + ESTILO, img_path, tentativas=2, premium=True)
+    if not ok:  # IA sem cota: foto real do Pixabay
+        ok = pixabay_foto(busca or BUSCA_NICHO.get(nicho, "health senior"), img_path) or              pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
+    if ok:
         foto = Image.open(img_path).convert("RGB")
         foto = ImageEnhance.Color(foto).enhance(1.45)
         foto = ImageEnhance.Contrast(foto).enhance(1.15)
@@ -652,7 +713,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
         log("  rosto da persona falhou:", str(e)[:150])
     thumb(roteiro.get("thumb_text") or job["title"], roteiro.get("thumb_highlight", ""),
           roteiro.get("thumb_prompt") or "close-up of the health problem", capa, pasta,
-          rosto=rosto, nicho=job.get("niche_key", ""))
+          rosto=rosto, nicho=job.get("niche_key", ""), busca=roteiro.get("thumb_query", ""))
     return final, capa, int(duracao(final))
 
 
@@ -682,7 +743,8 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
     corpo = {
         "snippet": {"title": job["title"][:100], "description": descricao(banco, job, roteiro)[:4900],
                     "tags": roteiro.get("tags", [])[:15], "categoryId": "26", "defaultLanguage": "en", "defaultAudioLanguage": "en"},
-        "status": {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True},
+        "status": {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
+                   "embeddable": True, "publicStatsViewable": True},
     }
     if publico:
         corpo["status"]["privacyStatus"] = "public"
@@ -703,7 +765,8 @@ def publicar(banco: Banco, job: dict):
     """Deixa PÚBLICO e põe o 1º comentário com o link rastreado (fixar comentário não existe na API do YouTube)."""
     yt = youtube_do_canal(banco, job["channel_id"])
     yt.videos().update(part="status", body={"id": job["video_id"], "status": {
-        "privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True}}).execute()
+        "privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
+        "embeddable": True, "publicStatsViewable": True}}).execute()
     link = link_do_job(banco, job)
     if link:
         texto = ((job.get("script") or {}).get("comment") or "I left the full recipe for how to get rid of this right here 👇").strip()
