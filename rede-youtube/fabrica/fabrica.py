@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -622,7 +622,7 @@ def cartao_qr(link: str, saida: Path):
 
 
 # ------------------------------------------------------------------ montagem
-def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path, Path, int]:
+def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: float = 0.95) -> tuple[Path, Path, int]:
     persona = persona_do_canal(job.get("channel_id", ""))
     voz = persona["voz"]  # a voz combina com o rosto da persona e é sempre a mesma no canal
     blocos = roteiro["segments"]
@@ -632,7 +632,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
     total = 0.0
     for i, b in enumerate(blocos):
         wav = pasta / f"fala_{i:03d}.wav"
-        falar(b["text"], voz, wav)
+        falar(b["text"], voz, wav, velocidade)
         total += duracao(wav) + 0.25
     if total < MIN_SEGUNDOS:
         raise RoteiroCurto(total)
@@ -736,21 +736,6 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
     (pasta / "fontes").mkdir(exist_ok=True)
     shutil.copy(FONTE, pasta / "fontes" / FONTE.name)
     # cor mais viva + vinheta leve (cara de vídeo editado) e a legenda dinâmica por cima
-    link = link_do_job(banco, job)
-    entradas_v = ["-i", str(pasta / "imagem.mp4"), "-i", str(pasta / "som.wav")]
-    grade = "eq=saturation=1.18:contrast=1.06,vignette=PI/5"
-    if link and ctas:
-        cartao_qr(link, pasta / "qr.png")
-        entradas_v += ["-loop", "1", "-t", f"{t:.2f}", "-i", str(pasta / "qr.png")]
-        quando = "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in ctas)
-        fc = (f"[0:v]{grade}[g];[g][2:v]overlay=x=W-w-50:y=50:enable='{quando}'[q];"
-              f"[q]subtitles=legenda.ass:fontsdir=fontes[v]")
-        filtro_v = ["-filter_complex", fc, "-map", "[v]", "-map", "1:a"]
-    else:
-        filtro_v = ["-vf", grade + ",subtitles=legenda.ass:fontsdir=fontes"]
-    sh("ffmpeg", "-y", *entradas_v, *filtro_v, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-       "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(final))
-
     capa = pasta / "thumb.jpg"
     rosto = None
     try:
@@ -765,6 +750,32 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
     if ia and definitiva:
         banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
                      headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ia:{job['id']}", "value": "ok"})
+    c = banco.get("yt_channels", channel_id=f"eq.{job.get('channel_id', '')}", select="long_uploads_status")
+    verificado = bool(c) and c[0].get("long_uploads_status") == "allowed"
+    link = link_do_job(banco, job)
+    entradas_v = ["-i", str(pasta / "imagem.mp4"), "-i", str(pasta / "som.wav")]
+    grade = "eq=saturation=1.18:contrast=1.06,vignette=PI/5"
+    fc, atual, k = f"[0:v]{grade}[g0];", "g0", 2
+    if link and ctas:
+        cartao_qr(link, pasta / "qr.png")
+        entradas_v += ["-loop", "1", "-t", f"{t:.2f}", "-i", str(pasta / "qr.png")]
+        quando = "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in ctas)
+        fc += f"[{atual}][{k}:v]overlay=x=W-w-50:y=50:enable='{quando}'[q{k}];"
+        atual, k = f"q{k}", k + 1
+    if verificado:
+        fc += f"[{atual}]subtitles=legenda.ass:fontsdir=fontes[v]"
+    else:
+        # canal sem verificação não aceita thumb personalizada: o YouTube escolhe a capa entre quadros
+        # por volta de 1/4, 1/2 e 3/4 do vídeo — a nossa thumb aparece ~1,2s nesses pontos (limpa, sem legenda)
+        entradas_v += ["-loop", "1", "-t", f"{t:.2f}", "-i", str(capa)]
+        pontos = "+".join(f"between(t,{t * f - 0.6:.2f},{t * f + 0.6:.2f})" for f in (0.25, 0.5, 0.75))
+        fc += (f"[{atual}]subtitles=legenda.ass:fontsdir=fontes[s];"
+               f"[{k}:v]scale={W}:{H}[capa];[s][capa]overlay=0:0:enable='{pontos}'[v]")
+        log("  canal sem verificação: capa colocada dentro do vídeo (1/4, 1/2 e 3/4)")
+    filtro_v = ["-filter_complex", fc, "-map", "[v]", "-map", "1:a"]
+    sh("ffmpeg", "-y", *entradas_v, *filtro_v, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+       "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(final))
+
     return final, capa, int(duracao(final))
 
 
@@ -830,6 +841,30 @@ def sem_links(texto: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", texto).strip()
 
 
+INTERVALO_MIN = (20, 40)  # minutos entre uma publicação e outra na rede inteira (sorteado)
+
+
+def reservar_horario(banco: Banco) -> datetime:
+    """Próximo horário livre para publicar (as várias máquinas disputam: troca atômica em app_secrets)."""
+    agora = datetime.now(timezone.utc)
+    for _ in range(8):
+        r = banco.get("app_secrets", key="eq.proximo_horario", select="value")
+        if not r:
+            banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                         headers={"Prefer": "resolution=ignore-duplicates"},
+                         json={"key": "proximo_horario", "value": (agora - timedelta(hours=1)).isoformat()})
+            continue
+        antigo = r[0]["value"]
+        ultimo = datetime.fromisoformat(antigo)
+        horario = max(agora, ultimo + timedelta(minutes=random.randint(*INTERVALO_MIN))).replace(microsecond=0)
+        ok = banco.s.patch(f"{banco.url}/rest/v1/app_secrets", params={"key": "eq.proximo_horario", "value": f"eq.{antigo}"},
+                           json={"value": horario.isoformat()}, headers={"Prefer": "return=representation"}, timeout=60)
+        if ok.ok and ok.json():
+            return horario
+        time.sleep(random.uniform(0.5, 2))
+    return agora + timedelta(minutes=random.randint(*INTERVALO_MIN))
+
+
 def descricao(banco: Banco, job: dict, roteiro: dict) -> str:
     """Link no TOPO da descrição (é o que aparece antes do 'mais'), depois o texto do roteiro."""
     link = link_do_job(banco, job)
@@ -841,7 +876,7 @@ def descricao(banco: Banco, job: dict, roteiro: dict) -> str:
             f"📌 Also in the first comment below and in the QR code on screen.")
 
 
-def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publico: bool = False) -> str:
+def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publico: bool = False, privado: bool = False) -> str:
     from googleapiclient.http import MediaFileUpload
     yt = youtube_do_canal(banco, job["channel_id"])
     corpo = {
@@ -852,6 +887,8 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
     }
     if publico:
         corpo["status"]["privacyStatus"] = "public"
+    elif privado:
+        corpo["status"]["privacyStatus"] = "private"
     req = yt.videos().insert(part="snippet,status", body=corpo,
                              media_body=MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
     resp = None
@@ -924,7 +961,7 @@ def processar(banco: Banco, job: dict):
         pasta = Path(tempfile.mkdtemp(prefix="video_"))
         try:
             os.chdir(pasta)
-            video, capa, dur = montar(banco, job, roteiro, pasta)
+            video, capa, dur = montar(banco, job, roteiro, pasta, velocidade=0.95 if tentativa < 2 else 0.87)
             break
         except RoteiroCurto as e:
             os.chdir(cwd)
@@ -948,9 +985,15 @@ def processar(banco: Banco, job: dict):
             except Exception as e:
                 log("  não apaguei a versão antiga:", str(e)[:100])
         direto = os.environ.get("PUBLICAR_DIRETO") == "1" and bool(link_do_job(banco, job))
-        log("  subindo", "PÚBLICO" if direto else "não listado", "...")
-        vid = subir(banco, job, roteiro, video, capa, publico=direto)
-        if direto:  # já sobe público: só falta o 1º comentário com o link
+        horario = reservar_horario(banco) if direto else None
+        ja = direto and horario <= datetime.now(timezone.utc) + timedelta(minutes=2)
+        log("  subindo", "PÚBLICO" if ja else (f"PRIVADO, vira público às {horario:%H:%M} UTC" if direto else "não listado"), "...")
+        vid = subir(banco, job, roteiro, video, capa, publico=ja, privado=direto and not ja)
+        if direto and not ja:
+            # espera o horário dele como PRIVADO (não é o agendamento do YouTube): a fábrica deixa público na hora
+            banco.job(jid, status="aprovado", video_id=vid, duration_s=dur, feedback=None, published_at=horario.isoformat(),
+                      thumb_url=f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
+        elif direto:  # já sobe público: só falta o 1º comentário com o link
             feito = {**job, "video_id": vid, "script": roteiro, "duration_s": dur}
             banco.job(jid, video_id=vid, duration_s=dur, feedback=None, thumb_url=f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
             try:
