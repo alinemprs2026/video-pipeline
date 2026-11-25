@@ -172,6 +172,18 @@ def escolher_relevantes(fala: str, busca: str, cands: list[dict]) -> list[dict] 
     return None
 
 
+# thumb: rosto idoso bem de perto — gênero do público de cada nicho e a dor que aparece no rosto
+GENERO_NICHO = {"queda_capilar": "woman", "pele": "woman", "emagrecimento": "woman", "disfuncao": "man"}
+DOR_NICHO = {"diabetes": "high blood sugar", "pulmao": "shortness of breath", "pele": "sagging, wrinkled aging skin",
+             "queda_capilar": "thinning hair falling out", "disfuncao": "men's health and prostate worries",
+             "emagrecimento": "stubborn belly fat", "neuropatia": "burning, tingling feet", "memoria": "memory loss and confusion",
+             "pressao": "dangerously high blood pressure"}
+REVISAO_CLOSE = """Strict quality check of an AI close-up portrait for a YouTube thumbnail.
+FAIL if ANY of: distorted, melted or asymmetric face; weird eyes, pupils or teeth; extra or deformed fingers/hands;
+more than one face; text, letters or watermark; plastic/cartoon look; the person looks younger than about 55.
+The top of the head or the chin being cropped by the frame is FINE (it is a close-up).
+Reply ONLY JSON: {"ok": true/false, "problems": ["short reason", ...]}"""
+
 # o que a foto grande da thumb TEM que mostrar (a IA confere)
 MOSTRA_NICHO = {"diabetes": "a blood sugar test or glucose meter", "pulmao": "human lungs or a person struggling to breathe",
                 "pele": "wrinkled or sagging aging skin on a face", "queda_capilar": "hair loss: hair falling out in a comb, brush or hand",
@@ -197,7 +209,9 @@ def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | 
         pergunta = (f"Does this photo clearly and directly show: {confere}? It must be a realistic photo that a viewer "
                     "instantly recognizes as that, with no text, logo or watermark. "
                     'Reply ONLY JSON: {"ok": true/false, "problems": []}')
-        for h in hits[:6]:
+        melhores = hits[:15]
+        random.shuffle(melhores)  # varia entre os bons resultados (não repete sempre o mesmo rosto/foto)
+        for h in melhores[:6]:
             if evitar is not None:
                 evitar.add(h["id"])
             if baixar(h.get("largeImageURL") or h["webformatURL"], destino) and revisar_imagem(destino, pergunta) is not False:
@@ -542,22 +556,35 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     # 1) foto do problema: fundo da metade direita + bolinha em destaque (anel amarelo)
     img_path = pasta / "thumb_img.png"
     foto = None
-    ok = gerar_imagem_revisada(prompt_img + ", extreme close-up, dramatic, high contrast, " + ESTILO, img_path,
-                               tentativas=4 if so_ia else 2, premium=True)
+    # padrão que mais puxa clique (pedido da dona): ROSTO de uma pessoa mais velha BEM DE PERTO, com a emoção da dor do vídeo
+    genero = GENERO_NICHO.get(nicho) or random.choice(["woman", "man"])
+    emocao = random.choice(["worried", "shocked", "distressed", "anxious"])
+    prompt_rosto = (f"extreme close-up photo of the face of a {random.choice([62, 65, 68, 70, 72])}-year-old American {genero} "
+                    f"with a {emocao} expression, troubled by {DOR_NICHO.get(nicho, 'a health problem')}, looking at the camera, "
+                    "face filling the frame, natural skin texture, dramatic soft side light, vivid colors, photorealistic, "
+                    "sharp focus, no text, no hands")
+    ok = gerar_imagem_revisada(prompt_rosto, img_path, REVISAO_CLOSE, tentativas=4 if so_ia else 2, premium=True,
+                               largura=1024, altura=1024)
     if so_ia and not ok:
         return False  # refazendo com IA e a IA está sem cota: não troca nada
     ia_usada = ok
-    if not ok:  # IA sem cota: foto real do Pixabay — sem rosto, a foto grande mostra o PROBLEMA do nicho
-        ok = (bool(busca) and pixabay_foto(busca, img_path, confere=busca)) \
-            or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho)) \
-            or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
+    if not ok:  # IA sem cota: foto real de rosto idoso bem de perto (conferida); em último caso, a imagem do problema
+        quem = "senior woman" if genero == "woman" else "senior man"
+        ok = pixabay_foto(f"{quem} worried face", img_path, pessoa=True, confere=(
+                 "a close-up of ONE older person's face (55+), worried, sad, shocked or in pain, the face filling most of the frame")) \
+            or pixabay_foto(f"elderly {genero} sad face", img_path, pessoa=True, confere=(
+                 "a close-up of ONE older person's face (55+) with a sad or worried expression")) \
+            or (bool(busca) and pixabay_foto(busca, img_path, confere=busca)) \
+            or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho))
     if ok:
         foto = Image.open(img_path).convert("RGB")
         foto = ImageEnhance.Color(foto).enhance(1.45)
         foto = ImageEnhance.Contrast(foto).enhance(1.15)
-        fundo = foto.resize((int(foto.width * 720 / foto.height), 720))
-        x = max(0, (fundo.width - 720) // 2)
-        fundo = fundo.crop((x, 0, x + 720, 720))
+        esc = max(720 / foto.width, 720 / foto.height)  # cobre a metade inteira (foto vertical ou horizontal)
+        fundo = foto.resize((max(720, int(foto.width * esc) + 1), max(720, int(foto.height * esc) + 1)))
+        x = (fundo.width - 720) // 2
+        y = int((fundo.height - 720) * 0.25)  # rosto costuma estar na parte de cima: corta mais embaixo
+        fundo = fundo.crop((x, y, x + 720, y + 720))
         if rosto:
             fundo = fundo.filter(ImageFilter.GaussianBlur(3))
         mascara = Image.new("L", (720, 720), 255)
