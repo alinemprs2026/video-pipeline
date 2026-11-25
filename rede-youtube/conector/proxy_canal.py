@@ -10,16 +10,42 @@ from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-ADSPOWER = "http://127.0.0.1:50325"
+# O AdsPower muda a porta da API local às vezes (50325, 50326…): testa as mais comuns e guarda a que respondeu
+PORTAS_ADSPOWER = [int(p) for p in os.environ.get("ADSPOWER_PORTAS", "50325,50326,50327,50328,50329,50330").split(",")]
+_ADSPOWER_OK: str | None = None
+
+
+def _adspower() -> str:
+    global _ADSPOWER_OK
+    if _ADSPOWER_OK:
+        return _ADSPOWER_OK
+    for porta in PORTAS_ADSPOWER:
+        base = f"http://127.0.0.1:{porta}"
+        try:
+            with urllib.request.urlopen(f"{base}/api/v1/user/list?page=1&page_size=1", timeout=3) as r:
+                if "data" in json.load(r):
+                    _ADSPOWER_OK = base
+                    return base
+        except Exception:
+            continue
+    raise ConnectionError("API local do AdsPower não respondeu em nenhuma porta (abra o AdsPower)")
 
 
 def proxies_adspower() -> dict[str, dict]:
     """IP do proxy -> {tipo, host, porta, usuario, senha, perfis:[nomes]} (só os perfis com proxy)."""
     out: dict[str, dict] = {}
     pagina = 1
+    base = _adspower()
+    import time
     while True:
-        with urllib.request.urlopen(f"{ADSPOWER}/api/v1/user/list?page={pagina}&page_size=100", timeout=10) as r:
-            d = json.load(r)
+        for tentativa in range(5):  # o AdsPower só aceita ~1 pedido por segundo: espera e tenta de novo
+            time.sleep(1.2)
+            with urllib.request.urlopen(f"{base}/api/v1/user/list?page={pagina}&page_size=100", timeout=10) as r:
+                d = json.load(r)
+            if d.get("code") == 0 and isinstance(d.get("data"), dict):
+                break
+        else:
+            raise ConnectionError(f"AdsPower recusou a lista de perfis: {str(d)[:120]}")
         lista = (d.get("data") or {}).get("list") or []
         for u in lista:
             p = u.get("user_proxy_config") or {}
