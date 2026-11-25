@@ -928,6 +928,17 @@ def comentario_com_link(texto: str, link: str) -> str:
 
 def marcar_publicado(banco: Banco, job: dict):
     agora = datetime.now(timezone.utc).isoformat()
+    # este vídeo substitui outro (ex.: versão com a capa dentro do vídeo)? a versão antiga vira PRIVADA (não apaga)
+    try:
+        sub = banco.get("app_secrets", key=f"eq.substituir:{job['id']}", select="value")
+        if sub:
+            youtube_do_canal(banco, job["channel_id"]).videos().update(part="status", body={"id": sub[0]["value"], "status": {
+                "privacyStatus": "private", "selfDeclaredMadeForKids": False}}).execute()
+            banco.s.patch(f"{banco.url}/rest/v1/yt_videos", params={"video_id": f"eq.{sub[0]['value']}"},
+                          json={"privacy": "private"}, timeout=60)
+            log("  versão antiga ficou privada:", sub[0]["value"])
+    except Exception as e:
+        log("  não deixei a versão antiga privada:", str(e)[:150])
     banco.job(job["id"], status="publicado", published_at=job.get("published_at") or agora)
     # já aparece no painel (Vídeos, números do dia) sem esperar o coletor de hora em hora
     try:
