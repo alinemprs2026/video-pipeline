@@ -1100,10 +1100,13 @@ def marcar_publicado(banco: Banco, job: dict):
                 "privacyStatus": "private", "selfDeclaredMadeForKids": False}}).execute()
             banco.s.patch(f"{banco.url}/rest/v1/yt_videos", params={"video_id": f"eq.{sub[0]['value']}"},
                           json={"privacy": "private"}, timeout=60)
+            # some da lista de publicados no painel (fica registrado como substituído)
+            banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"video_id": f"eq.{sub[0]['value']}"}, timeout=60,
+                          json={"status": "descartado", "error": "substituído pela versão nova (antigo ficou privado)"})
             log("  versão antiga ficou privada:", sub[0]["value"])
     except Exception as e:
         log("  não deixei a versão antiga privada:", str(e)[:150])
-    banco.job(job["id"], status="publicado", published_at=job.get("published_at") or agora)
+    banco.job(job["id"], status="publicado", published_at=job.get("published_at") or agora, error=None)
     # já aparece no painel (Vídeos, números do dia) sem esperar o coletor de hora em hora
     try:
         banco.s.post(f"{banco.url}/rest/v1/yt_videos", params={"on_conflict": "video_id"},
@@ -1273,6 +1276,8 @@ if __name__ == "__main__":
                     youtube_do_canal(b, j[0]["channel_id"]).videos().update(part="status", body={"id": s_["value"], "status": {
                         "privacyStatus": "private", "selfDeclaredMadeForKids": False}}).execute()
                     b.s.delete(f"{b.url}/rest/v1/app_secrets", params={"key": f"eq.{s_['key']}"}, timeout=60)
+                    b.s.patch(f"{b.url}/rest/v1/yt_jobs", params={"video_id": f"eq.{s_['value']}"}, timeout=60,
+                              json={"status": "descartado", "error": "substituído pela versão nova (antigo ficou privado)"})
                     log("versão antiga ficou privada:", s_["value"])
                 except Exception as e:
                     log("não deixei privada:", str(e)[:120])
