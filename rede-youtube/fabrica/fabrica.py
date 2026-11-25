@@ -1281,7 +1281,13 @@ def main():
             publicar_devidos(banco)  # entre um vídeo e outro, publica o que venceu (1 por vez)
         except Exception as e:
             traceback.print_exc()
-            banco.job(job["id"], status="erro", error=str(e)[:900])
+            msg = str(e)
+            # falha passageira (Gemini sobrecarregado, rede, proxy): volta pra fila e tenta de novo (até 6 tentativas)
+            passageira = any(k in msg for k in ("Gemini não escreveu", "503", "429", "timed out", "Connection", "SOCKS", "Max retries"))
+            if passageira and job.get("attempts", 0) < 6:
+                banco.job(job["id"], status="na_fila", error=f"vou tentar de novo: {msg[:300]}")
+            else:
+                banco.job(job["id"], status="erro", error=msg[:900])
     log("rodada terminada")
 
 

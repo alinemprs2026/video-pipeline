@@ -27,8 +27,9 @@ HARD RULES (YouTube policy + audience trust):
 - Give REAL useful information (the video must be worth watching even without clicking).
 - RETENTION FIRST: the first 60-90 seconds are pure hook + problem agitation: a vivid scene, a surprising fact,
   an open loop ("in a moment I'll show you the one thing..."). No intro, no "welcome back", no channel name.
-- CALLS TO ACTION, VSL style (3 times: the first pitch right after the hook at ~1:15, again around the middle,
-  and at the end). Speak like a caring friend who found the answer, e.g.:
+- CALLS TO ACTION, VSL style, 3 times. The FIRST pitch must come only after the viewer is WARMED UP: between 2:00 and
+  2:30 (roughly after the first 260-330 words), right after you have deepened the pain, shown what happens if they
+  ignore it and revealed the hidden cause — never before 2:00. The second around the middle (~4:30) and the last at the end. Speak like a caring friend who found the answer, e.g.:
   "I left the full recipe for how to get rid of this in the link — it's in the first comment right below this video."
   "If you'd rather not wait, scan the QR code on your screen now: it opens the complete step-by-step."
   "Don't close this video without checking the first comment — the {oferta} is there, and it's free to watch."
@@ -104,8 +105,9 @@ def _gemini(prompt: str) -> dict:
     if not chave:
         raise RuntimeError("Sem roteirista: falta GEMINI_API_KEY ou CLAUDE_CODE_OAUTH_TOKEN")
     ultimo = ""
-    for modelo in ("gemini-3.5-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite"):
-        for espera in (0, 30):
+    modelos = ("gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite")
+    for modelo in modelos + modelos:  # duas voltas: o Gemini às vezes fica sobrecarregado (503) por alguns minutos
+        for espera in (0, 45):
             time.sleep(espera)
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
                               params={"key": chave}, timeout=300,
