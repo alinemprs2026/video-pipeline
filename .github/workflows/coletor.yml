@@ -1,0 +1,32 @@
+# Coletor: de hora em hora lê os números dos canais. Log privado (Supabase Storage).
+name: coletor
+on:
+  schedule:
+    - cron: "10 * * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: coletor
+  cancel-in-progress: true
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TOKENS_DA_NUVEM: "1"
+      SEM_PROXY_PELO_SERVIDOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -q "requests[socks]>=2.31" "google-auth-oauthlib>=1.2" "google-api-python-client>=2.150" tzdata > /dev/null 2>&1
+      - name: Coletar (log privado)
+        run: |
+          set +e
+          python rede-youtube/coletor/coletar.py > log.txt 2>&1
+          code=$?
+          curl -s -o /dev/null -X POST "$SUPABASE_URL/storage/v1/bucket" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"id":"logs","name":"logs","public":false}'
+          curl -s -o /dev/null -X POST "$SUPABASE_URL/storage/v1/object/logs/coletor/$(date -u +%Y%m%d-%H).txt" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: text/plain" -H "x-upsert: true" --data-binary @log.txt
+          echo "coleta terminou (código $code)"
+          exit $code
