@@ -1062,6 +1062,18 @@ def main():
 
 if __name__ == "__main__":
     if "--thumbs" in sys.argv:  # troca thumbs provisórias por thumbs 100% IA quando a cota voltar
-        log("thumbs trocadas:", refazer_thumbs(Banco()))
+        b = Banco()
+        # garante: vídeo substituto publicado => versão antiga privada (caso a máquina que publicou fosse anterior)
+        for s_ in b.get("app_secrets", key="like.substituir:*", select="key,value"):
+            j = b.get("yt_jobs", id=f"eq.{s_['key'].split(':', 1)[1]}", select="id,channel_id,status")
+            if j and j[0]["status"] == "publicado":
+                try:
+                    youtube_do_canal(b, j[0]["channel_id"]).videos().update(part="status", body={"id": s_["value"], "status": {
+                        "privacyStatus": "private", "selfDeclaredMadeForKids": False}}).execute()
+                    b.s.delete(f"{b.url}/rest/v1/app_secrets", params={"key": f"eq.{s_['key']}"}, timeout=60)
+                    log("versão antiga ficou privada:", s_["value"])
+                except Exception as e:
+                    log("não deixei privada:", str(e)[:120])
+        log("thumbs trocadas:", refazer_thumbs(b))
     else:
         main()
