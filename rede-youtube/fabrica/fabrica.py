@@ -351,8 +351,26 @@ def transicao(tipo: str) -> str:
     return ""
 
 
-def clip_de_video(src: Path, dur: float, saida: Path, inicio=0.0, efeito=""):
-    vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS},setsar=1" + transicao(efeito)
+def visual_do_canal(channel_id: str) -> dict:
+    """Cada canal tem uma 'cara' própria: o mesmo clipe de banco sai com outra cor/enquadramento em outro canal."""
+    import hashlib
+    h = int(hashlib.md5((channel_id or "x").encode()).hexdigest(), 16)
+    return {"sat": 1.0 + (h % 25) / 100, "gamma": 0.94 + (h // 25 % 12) / 100, "matiz": (h // 300 % 13) - 6,
+            "espelho": 0.25 + (h // 4000 % 4) / 10}
+
+
+def clip_de_video(src: Path, dur: float, saida: Path, inicio=0.0, efeito="", visual: dict | None = None):
+    # enquadramento próprio de cada cena (zoom 0-12% e posição sorteada) + espelho às vezes + cor do canal
+    z = random.uniform(1.0, 1.12)
+    px, py = random.random(), random.random()
+    cw, ch = int(W / z) // 2 * 2, int(H / z) // 2 * 2
+    vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+          f"crop={cw}:{ch}:{int((W - cw) * px)}:{int((H - ch) * py)},scale={W}:{H},fps={FPS},setsar=1")
+    if visual:
+        if random.random() < visual["espelho"]:
+            vf += ",hflip"
+        vf += f",hue=h={visual['matiz']},eq=saturation={visual['sat']:.2f}:gamma={visual['gamma']:.2f}"
+    vf += transicao(efeito)
     sh("ffmpeg", "-y", "-ss", f"{inicio:.2f}", "-stream_loop", "-1", "-i", str(src), "-t", f"{dur:.3f}", "-vf", vf,
        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", str(saida))
 
@@ -701,7 +719,16 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
     persona = persona_do_canal(job.get("channel_id", ""))
     voz = persona["voz"]  # a voz combina com o rosto da persona e é sempre a mesma no canal
     blocos = roteiro["segments"]
+    # memória do canal: clipes de banco já usados nos vídeos anteriores DESTE canal não se repetem
+    memoria = pasta / "broll_usados.json"
     usados: set[int] = set()
+    if banco.baixar_arquivo("broll", f"{job.get('channel_id', 'x')}.json", memoria):
+        try:
+            usados = set(json.loads(memoria.read_text()))
+        except Exception:
+            usados = set()
+    ja_no_canal = len(usados)
+    visual = visual_do_canal(job.get("channel_id", ""))
     clipes, falas, legendas, destaques, ctas, cortes, t = [], [], [], [], [], [], 0.0
     bons_do_bloco: dict[int, list] = {}  # vídeos de apoio aprovados pela IA, por trecho
     # voz primeiro: confere os 7 minutos ANTES de gastar tempo com cenas
@@ -756,7 +783,11 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                     buscas = [q for q in (vis.get("queries") or []) + [vis.get("query")] if q]
                     bons = []
                     for q in buscas:  # a mais específica primeiro
-                        cand = [c for c in pixabay_videos(q) if c["id"] not in usados]
+                        cand = []
+                        for pagina in (1, 2, 3):  # se o canal já usou os primeiros, busca mais fundo
+                            cand += [c for c in pixabay_videos(q, pagina) if c["id"] not in usados]
+                            if len(cand) >= 4:
+                                break
                         if not cand:
                             continue
                         escolhidos = escolher_relevantes(b["text"], q, cand)
@@ -773,7 +804,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                     usados.add(c["id"])
                     mp4 = pasta / f"px_{c['id']}.mp4"
                     if mp4.exists() or baixar(c["url"], mp4):
-                        clip_de_video(mp4, cena_dur, saida, inicio=random.uniform(0, max(0, c["dur"] - cena_dur - 0.5)), efeito=efeito)
+                        clip_de_video(mp4, cena_dur, saida, inicio=random.uniform(0, max(0, c["dur"] - cena_dur - 0.5)), efeito=efeito, visual=visual)
                         feito = True
                         break
             if not feito:  # último recurso: repete uma cena anterior ou um fundo escuro
@@ -784,6 +815,18 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(saida))
             clipes.append(saida)
         log(f"  bloco {i + 1}/{len(blocos)} pronto ({dur:.1f}s)")
+
+    # guarda os clipes usados (até os 3000 mais recentes) para o próximo vídeo do canal não repetir
+    try:
+        memoria.write_text(json.dumps(list(usados)[-3000:]))
+        h = {"Content-Type": "application/json", "x-upsert": "true"}
+        r = banco.s.post(f"{banco.url}/storage/v1/object/broll/{job.get('channel_id', 'x')}.json", data=memoria.read_bytes(), headers=h, timeout=60)
+        if r.status_code in (400, 404) and "not found" in r.text.lower():
+            banco.s.post(f"{banco.url}/storage/v1/bucket", json={"id": "broll", "name": "broll", "public": False}, timeout=60)
+            banco.s.post(f"{banco.url}/storage/v1/object/broll/{job.get('channel_id', 'x')}.json", data=memoria.read_bytes(), headers=h, timeout=60)
+        log(f"  vídeos de apoio: {len(usados) - ja_no_canal} novos (canal já tinha usado {ja_no_canal})")
+    except Exception as e:
+        log("  não guardei a memória de clipes:", str(e)[:100])
 
     # áudio único: junta as falas com 0.25s de pausa entre os blocos (já contada no tempo das cenas)
     partes = []
