@@ -250,7 +250,7 @@ def imagem_openai(prompt: str, destino: Path, largura=1344, altura=768) -> bool:
 def imagem_cloudflare(prompt: str, destino: Path, largura=1344, altura=768):
     conta, token = os.environ["CF_ACCOUNT_ID"], os.environ["CF_API_TOKEN"]
     semente = random.randint(1, 2**31 - 1)  # semente nova a cada tentativa: se a 1ª sair defeituosa, a 2ª é outra imagem
-    modelos = [("@cf/black-forest-labs/flux-1-schnell", {"prompt": prompt, "steps": 8}),
+    modelos = [("@cf/black-forest-labs/flux-1-schnell", {"prompt": prompt, "steps": 4}),
                ("@cf/leonardo/lucid-origin", {"prompt": prompt, "width": largura, "height": altura, "steps": 20, "seed": semente})]
     if os.environ.get("IMAGEM_CAPRICHADA"):
         modelos.reverse()
