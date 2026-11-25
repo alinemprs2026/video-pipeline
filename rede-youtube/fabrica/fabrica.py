@@ -378,8 +378,9 @@ def persona_do_canal(channel_id: str) -> dict:
     return PERSONAS[int(hashlib.md5((channel_id or "x").encode()).hexdigest(), 16) % len(PERSONAS)]
 
 
-def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path) -> Path | None:
-    """Recorte (fundo transparente) do rosto da persona do canal. Gera UMA vez, revisa, guarda e reaproveita."""
+def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path, so_ia: bool = False) -> Path | None:
+    """Recorte (fundo transparente) do rosto da persona do canal. Gera UMA vez, revisa, guarda e reaproveita.
+    so_ia=True: só serve a persona DEFINITIVA (IA); se a IA estiver sem cota, devolve None."""
     destino = pasta / "persona.png"
     nome = f"{channel_id}.png"            # persona definitiva (IA)
     provisoria = f"provisoria_{channel_id}.png"  # foto de banco enquanto a IA está sem cota
@@ -390,7 +391,7 @@ def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path) -> Path | Non
               "mouth slightly open, looking straight at the camera, entire head visible with space above the hair, "
               "plain light grey studio background, soft studio lighting, sharp focus, photorealistic, 85mm, no hands")
     bruto = pasta / "persona_bruto.png"
-    for _ in range(2):
+    for _ in range(5 if so_ia else 2):
         if gerar_imagem_revisada(prompt, bruto, REVISAO_ROSTO, tentativas=1, premium=True, largura=1024, altura=1024):
             from rembg import new_session, remove
             from PIL import Image
@@ -400,6 +401,8 @@ def rosto_da_persona(banco: "Banco", channel_id: str, pasta: Path) -> Path | Non
             banco.guardar_arquivo("personas", nome, destino)
             log("  persona nova do canal criada e guardada")
             return destino
+    if so_ia:
+        return None
     # reserva: retrato real do Pixabay, PROVISÓRIO (quando a IA voltar, a definitiva substitui)
     if banco.baixar_arquivo("personas", provisoria, destino):
         return destino
@@ -452,7 +455,7 @@ def _degrade(w, h, c1, c2):
 
 
 def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
-          rosto: Path | None = None, nicho: str = "", busca: str = ""):
+          rosto: Path | None = None, nicho: str = "", busca: str = "", so_ia: bool = False) -> bool:
     """Padrão dos virais de saúde: fundo de cor VIVA, palavras ENORMES à esquerda (uma em tarja vermelha),
     o problema em foto à direita e o ROSTO da persona do canal na frente, com contorno branco."""
     from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
@@ -462,7 +465,11 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     # 1) foto do problema: fundo da metade direita + bolinha em destaque (anel amarelo)
     img_path = pasta / "thumb_img.png"
     foto = None
-    ok = gerar_imagem_revisada(prompt_img + ", extreme close-up, dramatic, high contrast, " + ESTILO, img_path, tentativas=2, premium=True)
+    ok = gerar_imagem_revisada(prompt_img + ", extreme close-up, dramatic, high contrast, " + ESTILO, img_path,
+                               tentativas=4 if so_ia else 2, premium=True)
+    if so_ia and not ok:
+        return False  # refazendo com IA e a IA está sem cota: não troca nada
+    ia_usada = ok
     if not ok:  # IA sem cota: foto real do Pixabay
         ok = pixabay_foto(busca or BUSCA_NICHO.get(nicho, "health senior"), img_path) or              pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
     if ok:
@@ -532,6 +539,7 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
             d.text((40, y), l, font=f, fill=cores[k % 2], stroke_width=7, stroke_fill=(0, 0, 0))
         y += tam + esp
     base.save(saida, "JPEG", quality=93)
+    return ia_usada
 
 
 # ------------------------------------------------------------------ link + QR
@@ -715,10 +723,51 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
         rosto = rosto_da_persona(banco, job.get("channel_id", ""), pasta)
     except Exception as e:
         log("  rosto da persona falhou:", str(e)[:150])
-    thumb(roteiro.get("thumb_text") or job["title"], roteiro.get("thumb_highlight", ""),
-          roteiro.get("thumb_prompt") or "close-up of the health problem", capa, pasta,
-          rosto=rosto, nicho=job.get("niche_key", ""), busca=roteiro.get("thumb_query", ""))
+    ia = thumb(roteiro.get("thumb_text") or job["title"], roteiro.get("thumb_highlight", ""),
+               roteiro.get("thumb_prompt") or "close-up of the health problem", capa, pasta,
+               rosto=rosto, nicho=job.get("niche_key", ""), busca=roteiro.get("thumb_query", ""))
+    # thumb 100% IA (persona definitiva + imagem de IA)? Se não, o refazedor troca quando a cota voltar
+    definitiva = bool(rosto) and banco.baixar_arquivo("personas", f"{job.get('channel_id', '')}.png", pasta / "_chk.png")
+    if ia and definitiva:
+        banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                     headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ia:{job['id']}", "value": "ok"})
     return final, capa, int(duracao(final))
+
+
+def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
+    """Troca a thumb provisória dos vídeos publicados (últimos 3 dias) por uma 100% IA, assim que houver cota."""
+    from datetime import timedelta
+    from googleapiclient.http import MediaFileUpload
+    desde = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    feitos_ok = {r["key"].split(":", 1)[1] for r in banco.get("app_secrets", key="like.thumb_ia:*", select="key")}
+    jobs = [j for j in banco.get("yt_jobs", status="eq.publicado", published_at=f"gte.{desde}", select="*", order="published_at")
+            if j["id"] not in feitos_ok and j.get("video_id")]
+    trocadas = 0
+    for job in jobs[:limite]:
+        pasta = Path(tempfile.mkdtemp(prefix="thumb_"))
+        try:
+            r = job.get("script") or {}
+            rosto = rosto_da_persona(banco, job["channel_id"], pasta, so_ia=True)
+            if not rosto:
+                log("  IA de imagem ainda sem cota — tento de novo mais tarde")
+                break
+            capa = pasta / "thumb.jpg"
+            if not thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""),
+                         r.get("thumb_prompt") or "close-up of the health problem", capa, pasta, rosto=rosto,
+                         nicho=job["niche_key"], busca=r.get("thumb_query", ""), so_ia=True):
+                log("  IA de imagem sem cota para a foto do problema — paro aqui")
+                break
+            youtube_do_canal(banco, job["channel_id"]).thumbnails().set(
+                videoId=job["video_id"], media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
+            banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                         headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ia:{job['id']}", "value": "ok"})
+            trocadas += 1
+            log(f"  thumb nova (IA) aplicada: {job['video_id']}")
+        except Exception as e:
+            log("  falhou ao refazer thumb:", str(e)[:150])
+        finally:
+            shutil.rmtree(pasta, ignore_errors=True)
+    return trocadas
 
 
 # ------------------------------------------------------------------ YouTube
@@ -917,4 +966,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--thumbs" in sys.argv:  # troca thumbs provisórias por thumbs 100% IA quando a cota voltar
+        log("thumbs trocadas:", refazer_thumbs(Banco()))
+    else:
+        main()
