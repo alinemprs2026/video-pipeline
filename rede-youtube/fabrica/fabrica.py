@@ -718,6 +718,29 @@ def pausar_por_cota(banco: "Banco"):
     log(f"COTA DO YOUTUBE ESGOTADA — fábrica pausada até {volta:%H:%M} UTC")
 
 
+SEM_PONTOS = False
+
+
+def comentarios_pendentes(banco: "Banco", limite: int = 30):
+    """Quando a cota volta: põe o 1º comentário com link (e a thumb, se o canal for verificado) nos vídeos que
+    subiram públicos no modo sem pontos."""
+    from googleapiclient.http import MediaFileUpload  # noqa: F401
+    for s_ in banco.get("app_secrets", key="like.comentario_pendente:*", select="key,value")[:limite]:
+        jid = s_["key"].split(":", 1)[1]
+        j = banco.get("yt_jobs", id=f"eq.{jid}", select="*")
+        if not j:
+            continue
+        try:
+            publicar(banco, j[0])  # já é público; aqui entra o comentário com o link rastreado
+            banco.s.delete(f"{banco.url}/rest/v1/app_secrets", params={"key": f"eq.{s_['key']}"}, timeout=60)
+            log("  comentário pendente postado:", j[0]["video_id"])
+        except Exception as e:
+            if cota_esgotada(e):
+                pausar_por_cota(banco)
+                return
+            log("  comentário pendente falhou:", str(e)[:120])
+
+
 def youtube_pausado(banco: "Banco") -> bool:
     r = banco.get("app_secrets", key="eq.youtube_cota_volta", select="value")
     return bool(r) and datetime.fromisoformat(r[0]["value"]) > datetime.now(timezone.utc)
@@ -983,7 +1006,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
         banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
                      headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ia:{job['id']}", "value": "ok"})
     c = banco.get("yt_channels", channel_id=f"eq.{job.get('channel_id', '')}", select="long_uploads_status")
-    verificado = bool(c) and c[0].get("long_uploads_status") == "allowed"
+    verificado = bool(c) and c[0].get("long_uploads_status") == "allowed" and not SEM_PONTOS  # sem pontos: capa vai dentro do vídeo
     link = link_do_job(banco, job)
     entradas_v = ["-i", str(pasta / "imagem.mp4"), "-i", str(pasta / "som.wav")]
     grade = "eq=saturation=1.18:contrast=1.06,vignette=PI/5"
@@ -1136,7 +1159,8 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
         _, resp = req.next_chunk()
     vid = resp["id"]
     try:
-        yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
+        if not SEM_PONTOS:
+            yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
     except Exception as e:
         log("  thumb não aplicada:", str(e)[:150])
     return vid
@@ -1245,6 +1269,19 @@ def processar(banco: Banco, job: dict):
             except Exception as e:
                 log("  não apaguei a versão antiga:", str(e)[:100])
         direto = os.environ.get("PUBLICAR_DIRETO") == "1" and bool(link_do_job(banco, job))
+        if direto and SEM_PONTOS:  # espera a vez dele (5-9 min depois do anterior) e sobe público direto
+            for _ in range(40):
+                if pode_publicar(banco):
+                    break
+                time.sleep(30)
+            vid = subir(banco, job, roteiro, video, capa, publico=True)
+            feito = {**job, "video_id": vid, "script": roteiro, "duration_s": dur}
+            banco.job(jid, video_id=vid, duration_s=dur, feedback=None, thumb_url=f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
+            marcar_publicado(banco, feito)
+            banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                         headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"comentario_pendente:{jid}", "value": vid})
+            log(f"  PÚBLICO (sem pontos de cota): https://youtu.be/{vid} — comentário e thumb entram quando a cota voltar")
+            return
         ja = direto and not banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1") and pode_publicar(banco)
         horario = None if ja else (datetime.now(timezone.utc) if direto else None)
         log("  subindo", "PÚBLICO" if ja else ("PRIVADO (pronto — sai na vez dele, 5-9 min após o anterior)" if direto else "não listado"), "...")
@@ -1315,15 +1352,18 @@ def publicar_devidos(banco: Banco) -> int:
 
 def main():
     banco = Banco()
-    if youtube_pausado(banco):
-        log("cota do YouTube esgotada hoje: nada a fazer até ela voltar")
-        return
-    publicar_devidos(banco)
+    global SEM_PONTOS
+    SEM_PONTOS = youtube_pausado(banco)
+    if SEM_PONTOS:
+        log("pontos da cota do YouTube esgotados: subo PÚBLICO direto (envio tem cota própria); thumb e comentário depois")
+    else:
+        publicar_devidos(banco)
+        comentarios_pendentes(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
     for job in fila:
-        if feitos >= MAX_POR_RODADA or youtube_pausado(banco):
+        if feitos >= MAX_POR_RODADA:
             break
         # pega o vídeo só se ninguém pegou (várias máquinas trabalham juntas)
         r = banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"id": f"eq.{job['id']}", "status": f"eq.{job['status']}"},
@@ -1334,7 +1374,8 @@ def main():
         log("fazendo:", job["title"])
         try:  # bio do canal com o link e palavras-chave do nicho (uma vez por nicho)
             import perfil
-            perfil.garantir_perfil(banco, sys.modules[__name__], job["channel_id"])
+            if not SEM_PONTOS:
+                perfil.garantir_perfil(banco, sys.modules[__name__], job["channel_id"])
         except Exception as e:
             log("  bio não atualizada:", str(e)[:150])
         try:
@@ -1344,9 +1385,10 @@ def main():
             traceback.print_exc()
             msg = str(e)
             if cota_esgotada(e):
-                banco.job(job["id"], status="na_fila", error="cota do YouTube esgotada hoje: sai quando a cota voltar")
+                banco.job(job["id"], status="na_fila", error="cota do YouTube: tentando de novo no modo sem pontos")
                 pausar_por_cota(banco)
-                break
+                SEM_PONTOS = True
+                continue
             # falha passageira (Gemini sobrecarregado, rede, proxy): volta pra fila e tenta de novo (até 6 tentativas)
             passageira = any(k in msg for k in ("Gemini não escreveu", "503", "429", "timed out", "Connection", "SOCKS", "Max retries"))
             if passageira and job.get("attempts", 0) < 6:
