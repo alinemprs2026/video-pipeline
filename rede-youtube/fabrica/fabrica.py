@@ -702,6 +702,27 @@ class LinkErrado(Exception):
     pass
 
 
+def cota_esgotada(e: Exception) -> bool:
+    t = str(e)
+    return "quota" in t and ("exceeded" in t or "quotaExceeded" in t)
+
+
+def pausar_por_cota(banco: "Banco"):
+    """A cota diária da API do YouTube acabou: pausa até ela voltar (meia-noite do Pacífico ≈ 08:00 UTC)."""
+    agora = datetime.now(timezone.utc)
+    volta = agora.replace(hour=8, minute=5, second=0, microsecond=0)
+    if volta <= agora:
+        volta += timedelta(days=1)
+    banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                 headers={"Prefer": "resolution=merge-duplicates"}, json={"key": "youtube_cota_volta", "value": volta.isoformat()})
+    log(f"COTA DO YOUTUBE ESGOTADA — fábrica pausada até {volta:%H:%M} UTC")
+
+
+def youtube_pausado(banco: "Banco") -> bool:
+    r = banco.get("app_secrets", key="eq.youtube_cota_volta", select="value")
+    return bool(r) and datetime.fromisoformat(r[0]["value"]) > datetime.now(timezone.utc)
+
+
 _PAGINAS_OK: dict[str, bool] = {}
 
 
@@ -1271,6 +1292,10 @@ def publicar_devidos(banco: Banco) -> int:
             banco.job(job["id"], status="erro", error=f"link: {e}")
             return 0
         except Exception as e:
+            if cota_esgotada(e):
+                banco.job(job["id"], status="aprovado", error=None)
+                pausar_por_cota(banco)
+                return 0
             if tentativa == 2:
                 banco.job(job["id"], status="aprovado", published_at=reservar_horario(banco).isoformat(),
                           error=f"publicar (vou tentar de novo): {str(e)[:300]}")
@@ -1282,12 +1307,15 @@ def publicar_devidos(banco: Banco) -> int:
 
 def main():
     banco = Banco()
+    if youtube_pausado(banco):
+        log("cota do YouTube esgotada hoje: nada a fazer até ela voltar")
+        return
     publicar_devidos(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
     for job in fila:
-        if feitos >= MAX_POR_RODADA:
+        if feitos >= MAX_POR_RODADA or youtube_pausado(banco):
             break
         # pega o vídeo só se ninguém pegou (várias máquinas trabalham juntas)
         r = banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"id": f"eq.{job['id']}", "status": f"eq.{job['status']}"},
@@ -1307,6 +1335,10 @@ def main():
         except Exception as e:
             traceback.print_exc()
             msg = str(e)
+            if cota_esgotada(e):
+                banco.job(job["id"], status="na_fila", error="cota do YouTube esgotada hoje: sai quando a cota voltar")
+                pausar_por_cota(banco)
+                break
             # falha passageira (Gemini sobrecarregado, rede, proxy): volta pra fila e tenta de novo (até 6 tentativas)
             passageira = any(k in msg for k in ("Gemini não escreveu", "503", "429", "timed out", "Connection", "SOCKS", "Max retries"))
             if passageira and job.get("attempts", 0) < 6:
@@ -1315,7 +1347,7 @@ def main():
                 banco.job(job["id"], status="erro", error=msg[:900])
     if os.environ.get("MAQUINA", "1") == "1":
         fim = time.time() + 50 * 60
-        while time.time() < fim and banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
+        while time.time() < fim and not youtube_pausado(banco) and banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
             publicar_devidos(banco)
             time.sleep(60)
     log("rodada terminada")
