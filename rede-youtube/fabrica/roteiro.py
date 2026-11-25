@@ -20,7 +20,7 @@ VARIANTES = {
 REGRAS = """
 HARD RULES (YouTube policy + audience trust):
 - English, warm and simple, for people over 60. Short sentences. Talk to "you".
-- AT LEAST {palavras} words of narration in total (7 to 9 minutes). Count them: shorter scripts are rejected.
+- Between {palavras} and 980 words of narration in total (the video must be 7 to 8 minutes). Count them: shorter scripts are rejected, much longer ones bore the viewer.
 - Never promise a cure, never say it "reverses" or "cures" a disease, never tell people to stop medication.
   Use "may help", "supports", "many people notice". Add one short line: "Talk to your doctor before changing anything."
 - Do NOT claim to be a doctor. You are a health educator/narrator.
@@ -48,7 +48,8 @@ FORMATO = """
 Return ONLY valid JSON, no markdown:
 {{
   "segments": [ {{"text": "2-4 sentences of narration", "visual": {{"type": "video" or "image",
-      "query": "2-4 word English stock-footage search (for type video)",
+      "query": "2-3 word stock-footage search that SHOWS LITERALLY what this segment says (concrete nouns: 'coconut oil spoon', 'senior woman forgetting keys', 'glucose meter finger')",
+      "queries": ["2 more alternative concrete searches for the same scene, from specific to a bit broader"],
       "prompt": "detailed photorealistic image description, no text (for type image)"}},
       "cta": "true ONLY on the 3 call-to-action segments",
       "on_screen": "OPTIONAL 1-3 word punch phrase that pops on screen (e.g. 3 AM SPIKE, NOT ALLERGIES, STOP THIS)" }} ],
@@ -63,6 +64,7 @@ Return ONLY valid JSON, no markdown:
   "fallback_query": "generic stock footage search for this niche"
 }}
 Use 34 to 45 segments. Alternate visuals: mostly "video", one "image" every 3-4 segments for things stock footage can't show.
+EVERY segment needs "query" and "queries" (also image segments): the B-roll must match what is being said in that exact moment, never generic filler.
 Image prompts: close-ups of objects, food, organs/body details or ONE face (head and shoulders). Never hands doing things,
 never full bodies or groups (AI draws them badly). Give "on_screen" to about 1 of every 3 segments, always in the first 2 segments.
 thumb_text: words of IMPACT (WARNING, STOP, NEVER, 3 AM, DANGER, numbers). thumb_prompt: the problem itself, very close, no people.
@@ -77,7 +79,7 @@ def montar_prompt(job: dict, variante: str, feedback: str | None, oferta: str) -
     p = [f"You write scripts for a faceless YouTube health channel for people over 60 (niche: {NICHOS_PT.get(job['niche_key'], job['niche_key'])}).",
          f'Video title (keep the promise exactly): "{job["title"]}"',
          "Style for this channel: " + VARIANTES[variante],
-         REGRAS.format(palavras=1500, oferta=oferta)]
+         REGRAS.format(palavras=880, oferta=oferta)]
     if feedback:
         p.append("The channel owner reviewed the previous version and asked for these changes (follow them carefully): " + feedback)
         if job.get("script"):
@@ -118,7 +120,7 @@ def _gemini(prompt: str) -> dict:
             try:
                 roteiro = _json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
                 palavras = sum(len(s["text"].split()) for s in roteiro["segments"])
-                if palavras < 1200:  # 7 min é LEI: roteiro curto volta
+                if palavras < 820:  # 7 min é LEI (a voz faz ~110 palavras/min): roteiro curto volta
                     ultimo = f"{modelo} curto ({palavras} palavras)"
                     continue
                 return roteiro

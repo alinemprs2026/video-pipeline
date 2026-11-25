@@ -625,11 +625,15 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
                     clip_de_imagem(png, cena_dur, saida, efeito)
                     feito = True
             if not feito:
-                consulta = vis.get("query") or roteiro.get("fallback_query", "senior health")
-                cand = [c for c in pixabay_videos(consulta) if c["id"] not in usados] or \
-                       [c for c in pixabay_videos(roteiro.get("fallback_query", "elderly healthy lifestyle")) if c["id"] not in usados]
-                cand = cand[:8]
-                random.shuffle(cand)
+                buscas = [q for q in (vis.get("queries") or []) + [vis.get("query")] if q]
+                cand = []
+                for q in buscas:  # a mais específica primeiro; só cai na genérica se nada combinar
+                    cand = [c for c in pixabay_videos(q) if c["id"] not in usados]
+                    if cand:
+                        break
+                if not cand:
+                    cand = [c for c in pixabay_videos(roteiro.get("fallback_query", "elderly healthy lifestyle")) if c["id"] not in usados]
+                cand = cand[:4]  # os mais relevantes da busca (sem sortear entre resultados fracos)
                 for c in cand[:3]:
                     usados.add(c["id"])
                     mp4 = pasta / f"px_{c['id']}.mp4"
@@ -656,7 +660,7 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path) -> tuple[Path,
 
     # som: voz + "whoosh" em cada palavra que salta + trilha (se houver músicas em fabrica/musicas)
     entradas, mix = ["-i", str(pasta / "voz.wav")], ["[0:a]"]
-    sons = sorted([(t0, "") for t0, _ in destaques] + [(t0 + 0.2, "") for t0 in cortes])
+    sons = []  # sem som de transição (decisão da dona); as palavras continuam saltando na tela
     if sons:
         whoosh(pasta / "whoosh.wav")
         entradas += ["-i", str(pasta / "whoosh.wav")]
@@ -781,7 +785,18 @@ def publicar(banco: Banco, job: dict):
     if link:
         texto = sem_links((job.get("script") or {}).get("comment") or "") or "I left the full recipe for how to get rid of this right here 👇"
         yt.commentThreads().insert(part="snippet", body={"snippet": {"videoId": job["video_id"], "topLevelComment": {
-            "snippet": {"textOriginal": f"{texto}\n\n👉 {link}"}}}}).execute()
+            "snippet": {"textOriginal": comentario_com_link(texto, link)}}}}).execute()
+
+
+def comentario_com_link(texto: str, link: str) -> str:
+    """Link logo depois da 1ª frase (antes do 'Ler mais'); o resto do texto vem embaixo."""
+    m = re.match(r"(.+?[.!?…](?:\s*[^\w\s]{1,3})?)\s+(.*)", texto.strip(), re.S)
+    primeira, resto = (m.group(1), m.group(2)) if m else (texto.strip(), "")
+    # frases do resto que só apontavam pro link ("está no link aqui 👇") saem: o link já está em cima
+    frases = re.split(r"(?<=[.!?…👇])\s+|\n+", resto)
+    resto = " ".join(f for f in frases if not re.search(r"\blink\b|👇", f, re.I)).strip()
+    resto = re.sub(r"\s*\n\s*\n\s*", "\n\n", resto)
+    return f"{primeira} The full step-by-step is here 👇\n👉 {link}\n\n{resto}".strip()
 
 
 def marcar_publicado(banco: Banco, job: dict):
@@ -826,7 +841,7 @@ def processar(banco: Banco, job: dict):
             shutil.rmtree(pasta, ignore_errors=True)
             if tentativa == 2:
                 raise
-            falta = int((MIN_SEGUNDOS + 30 - e.seg) * 2.6) + 150
+            falta = int((MIN_SEGUNDOS + 30 - e.seg) * 1.9) + 60
             log(f"  roteiro curto ({e}) — pedindo +{falta} palavras")
             roteiro = roteirista.escrever({**job, "script": roteiro, "feedback":
                 f"The previous version was too short ({e.seg:.0f} seconds). The video MUST be at least 7 minutes. "
@@ -888,6 +903,11 @@ def main():
             continue
         feitos += 1
         log("fazendo:", job["title"])
+        try:  # bio do canal com o link e palavras-chave do nicho (uma vez por nicho)
+            import perfil
+            perfil.garantir_perfil(banco, sys.modules[__name__], job["channel_id"])
+        except Exception as e:
+            log("  bio não atualizada:", str(e)[:150])
         try:
             processar(banco, job)
         except Exception as e:
