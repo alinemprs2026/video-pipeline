@@ -1,0 +1,22 @@
+# Pulso: a cada 5 min atualiza views/inscritos de todos os canais e vídeos recentes (barato: ~8 pontos de cota).
+name: pulso
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: pulso
+  cancel-in-progress: true
+jobs:
+  pulso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -q "requests[socks]>=2.31" "google-auth-oauthlib>=1.2" "google-api-python-client>=2.150" tzdata > /dev/null 2>&1
+      - run: python rede-youtube/coletor/pulso.py > log.txt 2>&1; tail -c 0 log.txt

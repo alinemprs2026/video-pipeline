@@ -548,7 +548,8 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
         return False  # refazendo com IA e a IA está sem cota: não troca nada
     ia_usada = ok
     if not ok:  # IA sem cota: foto real do Pixabay — sem rosto, a foto grande mostra o PROBLEMA do nicho
-        ok = pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho)) \
+        ok = (bool(busca) and pixabay_foto(busca, img_path, confere=busca)) \
+            or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho)) \
             or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path)
     if ok:
         foto = Image.open(img_path).convert("RGB")
@@ -591,8 +592,8 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
             ImageDraw.Draw(base).ellipse([cx - 12, cy - 12, cx + dia + 12, cy + dia + 12], fill=(255, 230, 0))
             base.paste(q, (cx, cy), m)
 
-    # 2b) SEM rosto: o ingrediente/solução do título numa bolinha grande (anel amarelo), embaixo à direita
-    if not (rosto and rosto.exists()):
+    # 2b) desligado: o padrão fixo é só palavras + UMA imagem (sem bolinha)
+    if False:
         ing = pasta / "thumb_ing.jpg"
         if busca and pixabay_foto(busca, ing, confere=busca):
             q = Image.open(ing).convert("RGB")
@@ -875,15 +876,14 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
     capa = pasta / "thumb.jpg"
     rosto = None
     try:
-        rosto = rosto_da_persona(banco, job.get("channel_id", ""), pasta, so_ia=True)
+        rosto = None  # padrão fixo da dona: palavras numa metade + UMA imagem da situação na outra (sem rosto)
     except Exception as e:
         log("  rosto da persona falhou:", str(e)[:150])
     ia = thumb(roteiro.get("thumb_text") or job["title"], roteiro.get("thumb_highlight", ""),
                roteiro.get("thumb_prompt") or "close-up of the health problem", capa, pasta,
                rosto=rosto, nicho=job.get("niche_key", ""), busca=roteiro.get("thumb_query", ""))
     # thumb 100% IA (persona definitiva + imagem de IA)? Se não, o refazedor troca quando a cota voltar
-    definitiva = bool(rosto) and banco.baixar_arquivo("personas", f"{job.get('channel_id', '')}.png", pasta / "_chk.png")
-    if ia and definitiva:
+    if ia:
         banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
                      headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ia:{job['id']}", "value": "ok"})
     c = banco.get("yt_channels", channel_id=f"eq.{job.get('channel_id', '')}", select="long_uploads_status")
@@ -928,9 +928,9 @@ def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
         pasta = Path(tempfile.mkdtemp(prefix="thumb_"))
         try:
             r = job.get("script") or {}
-            rosto = rosto_da_persona(banco, job["channel_id"], pasta, so_ia=True)
+            rosto = None  # padrão fixo: sem rosto
             capa = pasta / "thumb.jpg"
-            ia = bool(rosto) and thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""),
+            ia = thumb(r.get("thumb_text") or job["title"], r.get("thumb_highlight", ""),
                                        r.get("thumb_prompt") or "close-up of the health problem", capa, pasta, rosto=rosto,
                                        nicho=job["niche_key"], busca=r.get("thumb_query", ""), so_ia=True)
             if not ia:
