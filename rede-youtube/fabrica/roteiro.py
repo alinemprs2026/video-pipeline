@@ -105,7 +105,7 @@ def _gemini(prompt: str) -> dict:
     if not chave:
         raise RuntimeError("Sem roteirista: falta GEMINI_API_KEY ou CLAUDE_CODE_OAUTH_TOKEN")
     ultimo = ""
-    modelos = ("gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite")
+    modelos = ("gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3-flash-preview")
     for modelo in modelos + modelos:  # duas voltas: o Gemini às vezes fica sobrecarregado (503) por alguns minutos
         for espera in (0, 45):
             time.sleep(espera)

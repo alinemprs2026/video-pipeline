@@ -36,6 +36,8 @@ FONTE = Path(os.environ.get("FONTE_THUMB", AQUI / "fontes" / "Anton-Regular.ttf"
 MAX_POR_RODADA = int(os.environ.get("MAX_POR_RODADA", "2"))
 VOZES = ["am_michael", "af_heart", "bf_emma", "am_adam"]
 MIN_SEGUNDOS = 425  # alvo: 7 min (com folga)
+# conferência de imagens/vídeos de apoio usa SÓ os modelos "lite" do Gemini (cota separada da dos roteiros)
+MODELOS_CONFERENCIA = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
 ACEITA_SEGUNDOS = 390  # a dona aceita pouca variação: a partir de 6min30 não refaz nada
 
 
@@ -157,7 +159,7 @@ def escolher_relevantes(fala: str, busca: str, cands: list[dict]) -> list[dict] 
         "random landscapes, sports, unrelated people) and anything childish or inappropriate. "
         'Reply ONLY JSON: {"ok": [clip numbers, best first]}')})
     corpo = {"contents": [{"parts": partes}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
-    for modelo in ("gemini-3.5-flash-lite", "gemini-3.5-flash"):
+    for modelo in MODELOS_CONFERENCIA:  # só "lite": não gasta a cota dos modelos que escrevem os roteiros
         try:
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
                               params={"key": chave}, json=corpo, timeout=90)
@@ -322,7 +324,7 @@ def revisar_imagem(arq: Path, instrucao: str) -> bool | None:
     corpo = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": base64.b64encode(arq.read_bytes()).decode()}},
                                      {"text": instrucao}]}],
              "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
-    for modelo in ("gemini-3.5-flash-lite", "gemini-3.5-flash"):
+    for modelo in MODELOS_CONFERENCIA:  # só "lite": não gasta a cota dos modelos que escrevem os roteiros
         for espera in (0, 20):
             time.sleep(espera)
             try:
