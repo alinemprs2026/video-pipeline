@@ -787,6 +787,16 @@ def publicar(banco: Banco, job: dict):
 def marcar_publicado(banco: Banco, job: dict):
     agora = datetime.now(timezone.utc).isoformat()
     banco.job(job["id"], status="publicado", published_at=job.get("published_at") or agora)
+    # já aparece no painel (Vídeos, números do dia) sem esperar o coletor de hora em hora
+    try:
+        banco.s.post(f"{banco.url}/rest/v1/yt_videos", params={"on_conflict": "video_id"},
+                     headers={"Prefer": "resolution=merge-duplicates"}, timeout=60, json={
+            "video_id": job["video_id"], "channel_id": job["channel_id"], "user_id": job["user_id"],
+            "title": job["title"][:100], "published_at": job.get("published_at") or agora,
+            "thumbnail_url": f"https://i.ytimg.com/vi/{job['video_id']}/mqdefault.jpg",
+            "duration_s": job.get("duration_s"), "is_short": False, "privacy": "public", "synced_at": agora})
+    except Exception as e:
+        log("  não registrei no painel:", str(e)[:120])
     if job.get("title_id"):
         banco.patch("yt_title_bank", {"id": f"eq.{job['title_id']}"},
                     {"status": "usado", "used_at": agora, "video_id": job["video_id"]})
@@ -836,7 +846,7 @@ def processar(banco: Banco, job: dict):
         log("  subindo", "PÚBLICO" if direto else "não listado", "...")
         vid = subir(banco, job, roteiro, video, capa, publico=direto)
         if direto:  # já sobe público: só falta o 1º comentário com o link
-            feito = {**job, "video_id": vid, "script": roteiro}
+            feito = {**job, "video_id": vid, "script": roteiro, "duration_s": dur}
             banco.job(jid, video_id=vid, duration_s=dur, feedback=None, thumb_url=f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
             try:
                 publicar(banco, feito)
