@@ -1017,9 +1017,14 @@ def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
     from googleapiclient.http import MediaFileUpload
     desde = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     feitos_ok = {r["key"].split(":", 1)[1] for r in banco.get("app_secrets", key="like.thumb_ia:*", select="key")}
+    # canal SEM verificação não aceita trocar thumb: nem tenta (cada tentativa gasta 50 pontos da cota do YouTube)
+    verificados = {c["channel_id"] for c in banco.get("yt_channels", select="channel_id", long_uploads_status="eq.allowed")}
     jobs = [j for j in banco.get("yt_jobs", status="eq.publicado", published_at=f"gte.{desde}", select="*", order="published_at")
-            if j["id"] not in feitos_ok and j.get("video_id")]
+            if j["id"] not in feitos_ok and j.get("video_id") and j["channel_id"] in verificados]
+    if youtube_pausado(banco):
+        return 0
     trocadas = 0
+    limite = min(limite, 8)  # no máximo 8 trocas por rodada (economia de cota)
     for job in jobs[:limite]:
         pasta = Path(tempfile.mkdtemp(prefix="thumb_"))
         try:
@@ -1049,6 +1054,9 @@ def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
             log(f"  thumb nova (IA) aplicada: {job['video_id']}")
         except Exception as e:
             log("  falhou ao refazer thumb:", str(e)[:150])
+            if cota_esgotada(e):
+                pausar_por_cota(banco)
+                break
         finally:
             shutil.rmtree(pasta, ignore_errors=True)
     return trocadas
