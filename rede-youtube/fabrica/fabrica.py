@@ -1025,7 +1025,7 @@ def sem_links(texto: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", texto).strip()
 
 
-INTERVALO_MIN = (20, 40)  # minutos entre uma publicação e outra na rede inteira (sorteado)
+INTERVALO_MIN = (8, 15)  # minutos entre uma publicação e outra na rede inteira (sorteado)
 
 
 def reservar_horario(banco: Banco) -> datetime:

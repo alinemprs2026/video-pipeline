@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        maquina: [1, 2, 3, 4]   # 4 vídeos ao mesmo tempo (cada máquina "pega" um vídeo diferente)
+        maquina: [1, 2, 3, 4, 5, 6]   # 6 vídeos ao mesmo tempo (cada máquina "pega" um vídeo diferente)
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
