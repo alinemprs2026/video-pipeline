@@ -582,22 +582,19 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
     # padrão que mais puxa clique (pedido da dona): ROSTO de uma pessoa mais velha BEM DE PERTO, com a emoção da dor do vídeo
     genero = GENERO_NICHO.get(nicho) or random.choice(["woman", "man"])
     emocao = random.choice(["worried", "shocked", "distressed", "anxious"])
-    prompt_rosto = (f"extreme close-up photo of the face of a {random.choice([62, 65, 68, 70, 72])}-year-old American {genero} "
+    prompt_rosto = (f"extreme close-up portrait photo of a well-groomed, healthy-looking {random.choice([62, 65, 68, 70, 72])}-year-old "
+                    f"middle-class American {genero}, neat styled hair, clean tidy clothes, light makeup if a woman, "
                     f"with a {emocao} expression, troubled by {DOR_NICHO.get(nicho, 'a health problem')}, looking at the camera, "
-                    "face filling the frame, natural skin texture, dramatic soft side light, vivid colors, photorealistic, "
-                    "sharp focus, no text, no hands")
+                    "face filling the frame, bright cozy colorful home background softly blurred, warm vivid colors, "
+                    "soft natural light, high-end magazine photography, photorealistic, sharp focus, no text, no hands")
     ok = gerar_imagem_revisada(prompt_rosto, img_path, REVISAO_CLOSE, tentativas=4 if so_ia else 2, premium=True,
                                largura=1024, altura=1024)
     if so_ia and not ok:
         return False  # refazendo com IA e a IA está sem cota: não troca nada
     ia_usada = ok
-    if not ok:  # IA sem cota: foto real de rosto idoso bem de perto (conferida); em último caso, a imagem do problema
-        quem = "senior woman" if genero == "woman" else "senior man"
-        ok = pixabay_foto(f"{quem} worried face", img_path, pessoa=True, confere=(
-                 "a close-up of ONE older person's face (55+), worried, sad, shocked or in pain, the face filling most of the frame")) \
-            or pixabay_foto(f"elderly {genero} sad face", img_path, pessoa=True, confere=(
-                 "a close-up of ONE older person's face (55+) with a sad or worried expression")) \
-            or (bool(busca) and pixabay_foto(busca, img_path, confere=busca)) \
+    if not ok:  # IA sem cota: NUNCA rosto de banco (pedido da dona) — imagem colorida do problema/ingrediente;
+        # o refazedor troca pela versão com rosto de IA assim que a cota voltar
+        ok = (bool(busca) and pixabay_foto(busca, img_path, confere=busca)) \
             or pixabay_foto(BUSCA_NICHO.get(nicho, "health senior"), img_path, confere=MOSTRA_NICHO.get(nicho))
     if ok:
         foto = Image.open(img_path).convert("RGB")
