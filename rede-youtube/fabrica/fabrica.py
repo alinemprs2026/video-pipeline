@@ -578,6 +578,39 @@ def thumb(texto: str, destaque: str, prompt_img: str, saida: Path, pasta: Path,
 
 
 # ------------------------------------------------------------------ link + QR
+class LinkErrado(Exception):
+    pass
+
+
+_PAGINAS_OK: dict[str, bool] = {}
+
+
+def conferir_link(banco: "Banco", job: dict) -> str:
+    """Trava antes de publicar: nicho do vídeo == nicho ATUAL do canal, link == produto desse nicho,
+    e a página abre e é MESMO esse produto (código do link + afiliada cg_pub da dona). Senão, não publica."""
+    c = banco.get("yt_channels", channel_id=f"eq.{job['channel_id']}", select="niche_id")
+    if not c or not c[0].get("niche_id"):
+        raise LinkErrado("canal sem nicho")
+    n = banco.get("yt_niches", id=f"eq.{c[0]['niche_id']}", select="key,affiliate_link,link_code")
+    if not n or n[0]["key"] != job["niche_key"]:
+        raise LinkErrado(f"o vídeo é de '{job['niche_key']}' mas o canal agora é de '{n[0]['key'] if n else '?'}'")
+    base, code = (n[0].get("affiliate_link") or "").strip(), n[0].get("link_code")
+    if not base or not code:
+        raise LinkErrado("nicho sem link ou sem código do link")
+    if base not in _PAGINAS_OK:
+        try:
+            h = requests.get(base, timeout=30, headers={"User-Agent": "Mozilla/5.0"}).text
+            _PAGINAS_OK[base] = f"|{code}" in h and "cg_pub" in h
+        except Exception:
+            _PAGINAS_OK[base] = False
+    if not _PAGINAS_OK[base]:
+        raise LinkErrado(f"a página {base} não abriu ou não é o produto certo (código {code})")
+    link = link_do_job(banco, job)
+    if not link or not link.startswith(base) or f"pg={job.get('pg') or job['id'].replace('-', '')[:12]}" not in link:
+        raise LinkErrado("link montado sem o rastreio do vídeo")
+    return link
+
+
 def link_do_job(banco: "Banco", job: dict) -> str | None:
     """Link do produto do nicho com o rastreio do vídeo: ?pg=<código do job>&utm_source=youtube."""
     n = banco.get("yt_niches", key=f"eq.{job['niche_key']}", user_id=f"eq.{job['user_id']}", select="affiliate_link")
@@ -913,6 +946,7 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
 
 def publicar(banco: Banco, job: dict):
     """Deixa PÚBLICO e põe o 1º comentário com o link rastreado (fixar comentário não existe na API do YouTube)."""
+    conferir_link(banco, job)  # última conferência: nicho do canal, produto certo e página no ar
     yt = youtube_do_canal(banco, job["channel_id"])
     yt.videos().update(part="status", body={"id": job["video_id"], "status": {
         "privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
@@ -970,6 +1004,8 @@ def processar(banco: Banco, job: dict):
     if not job.get("pg"):
         job["pg"] = jid.replace("-", "")[:12]
     banco.job(jid, status="gerando", attempts=job["attempts"] + 1, error=None, pg=job["pg"])
+    if os.environ.get("PUBLICAR_DIRETO") == "1":
+        conferir_link(banco, job)  # nicho/link/página errados: nem começa (vira "erro" com o motivo no painel)
     roteiro = job.get("script")
     if not roteiro or job["status"] == "refazer":
         log("  escrevendo roteiro...")
