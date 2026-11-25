@@ -35,7 +35,8 @@ MODELOS = Path(os.environ.get("KOKORO_DIR", Path.home() / ".cache" / "kokoro"))
 FONTE = Path(os.environ.get("FONTE_THUMB", AQUI / "fontes" / "Anton-Regular.ttf"))
 MAX_POR_RODADA = int(os.environ.get("MAX_POR_RODADA", "2"))
 VOZES = ["am_michael", "af_heart", "bf_emma", "am_adam"]
-MIN_SEGUNDOS = 425  # 7 min (com folga) — regra da dona: nenhum vídeo abaixo disso
+MIN_SEGUNDOS = 425  # alvo: 7 min (com folga)
+ACEITA_SEGUNDOS = 390  # a dona aceita pouca variação: a partir de 6min30 não refaz nada
 
 
 class RoteiroCurto(Exception):
@@ -629,13 +630,21 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
     usados: set[int] = set()
     clipes, falas, legendas, destaques, ctas, cortes, t = [], [], [], [], [], [], 0.0
     # voz primeiro: confere os 7 minutos ANTES de gastar tempo com cenas
-    total = 0.0
-    for i, b in enumerate(blocos):
-        wav = pasta / f"fala_{i:03d}.wav"
-        falar(b["text"], voz, wav, velocidade)
-        total += duracao(wav) + 0.25
-    if total < MIN_SEGUNDOS:
-        raise RoteiroCurto(total)
+    def narrar(vel):
+        tot = 0.0
+        for i, b in enumerate(blocos):
+            wav = pasta / f"fala_{i:03d}.wav"
+            falar(b["text"], voz, wav, vel)
+            tot += duracao(wav) + 0.25
+        return tot
+
+    total = narrar(velocidade)
+    if total < ACEITA_SEGUNDOS and velocidade > 0.88:
+        # ficou curto: primeiro só deixa a voz um pouco mais lenta (sem reescrever nada)
+        log(f"  narração com {total:.0f}s — refazendo só a voz, mais devagar")
+        total = narrar(0.86)
+    if total < ACEITA_SEGUNDOS:
+        raise RoteiroCurto(total)  # muito curto mesmo: aí sim o roteiro é aumentado
     log(f"  narração: {total / 60:.1f} min")
     for i, b in enumerate(blocos):
         wav = pasta / f"fala_{i:03d}.wav"
