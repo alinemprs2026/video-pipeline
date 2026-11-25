@@ -714,13 +714,21 @@ _SLUGS: dict[str, str] = {}
 
 
 def canal_slug(banco: "Banco", channel_id: str) -> str:
-    """Nome do canal do jeito que a 001 guarda (a-z, 0-9 e hífen): ex. salute-dei-nonni."""
+    """Código do canal nos links (a-z, 0-9 e hífen), CONGELADO na 1ª vez (app_secrets slug:<canal>):
+    se a dona trocar o nome do canal, o rastreio continua o mesmo e nenhum clique se perde."""
     if channel_id not in _SLUGS:
-        import unicodedata
-        c = banco.get("yt_channels", channel_id=f"eq.{channel_id}", select="name")
-        nome = (c[0]["name"] if c else channel_id) or channel_id
-        nome = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode().lower()
-        _SLUGS[channel_id] = (re.sub(r"[^a-z0-9]+", "-", nome).strip("-") or "canal")[:40]
+        salvo = banco.get("app_secrets", key=f"eq.slug:{channel_id}", select="value")
+        if salvo:
+            _SLUGS[channel_id] = salvo[0]["value"]
+        else:
+            import unicodedata
+            c = banco.get("yt_channels", channel_id=f"eq.{channel_id}", select="name")
+            nome = (c[0]["name"] if c else channel_id) or channel_id
+            nome = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode().lower()
+            _SLUGS[channel_id] = (re.sub(r"[^a-z0-9]+", "-", nome).strip("-") or "canal")[:40]
+            banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                         headers={"Prefer": "resolution=ignore-duplicates"},
+                         json={"key": f"slug:{channel_id}", "value": _SLUGS[channel_id]})
     return _SLUGS[channel_id]
 
 
