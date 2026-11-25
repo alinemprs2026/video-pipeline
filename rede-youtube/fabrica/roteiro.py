@@ -21,7 +21,7 @@ VARIANTES = {
 REGRAS = """
 HARD RULES (YouTube policy + audience trust):
 - English, warm and simple, for people over 60. Short sentences. Talk to "you".
-- Between {palavras} and 980 words of narration in total (the video must be 7 to 8 minutes). Count them: shorter scripts are rejected, much longer ones bore the viewer.
+- About {palavras} words of narration in total (between {palavras} and {palavras} + 80) (the video must be 7 to 8 minutes). Count them: shorter scripts are rejected, much longer ones bore the viewer.
 - Never promise a cure, never say it "reverses" or "cures" a disease, never tell people to stop medication.
   Use "may help", "supports", "many people notice". Add one short line: "Talk to your doctor before changing anything."
 - Do NOT claim to be a doctor. You are a health educator/narrator.
@@ -96,7 +96,7 @@ def montar_prompt(job: dict, variante: str, feedback: str | None, oferta: str) -
     p = [f"You write scripts for a faceless YouTube health channel for people over 60 (niche: {NICHOS_PT.get(job['niche_key'], job['niche_key'])}).",
          f'Video title (keep the promise exactly): "{job["title"]}"',
          "Style for this channel: " + VARIANTES[variante],
-         REGRAS.format(palavras=860, oferta=oferta),
+         REGRAS.format(palavras=job.get("_palavras") or 950, oferta=oferta),
          f"COPY ALIGNMENT (very important, this is what makes people buy): the full recipe behind the link is {heroi}. "
          "Deliver what the title promises, but build the story so the viewer feels the missing piece is exactly that: "
          "mention it (without the brand name) as the 'little-known trick' and make every call to action point to it, e.g. "

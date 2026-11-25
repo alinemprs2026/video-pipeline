@@ -42,9 +42,16 @@ ACEITA_SEGUNDOS = 390  # a dona aceita pouca variação: a partir de 6min30 não
 
 
 class RoteiroCurto(Exception):
-    def __init__(self, seg):
+    def __init__(self, seg, palavras_por_seg=2.4, palavras=0):
         super().__init__(f"narração com {seg:.0f}s (mínimo {MIN_SEGUNDOS}s)")
-        self.seg = seg
+        self.seg, self.pps, self.palavras = seg, palavras_por_seg, palavras
+
+
+def palavras_alvo(banco: "Banco", voz: str) -> int:
+    """Quantas palavras dão 7-8 min NESTA voz (cada voz fala numa velocidade; medido nos vídeos anteriores)."""
+    r = banco.get("app_secrets", key=f"eq.pps:{voz}", select="value")
+    pps = float(r[0]["value"]) if r else 2.4
+    return int(455 * pps)  # ~7min35 de narração
 
 
 def log(*a):
@@ -810,8 +817,15 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
         # ficou curto: primeiro só deixa a voz um pouco mais lenta (sem reescrever nada)
         log(f"  narração com {total:.0f}s — refazendo só a voz, mais devagar")
         total = narrar(0.86)
+    n_pal = sum(len(b["text"].split()) for b in blocos)
+    pps = n_pal / max(1.0, total)  # palavras por segundo desta voz (guarda para os próximos roteiros já virem no tamanho certo)
+    try:
+        banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=30,
+                     headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"pps:{voz}", "value": f"{pps:.3f}"})
+    except Exception:
+        pass
     if total < ACEITA_SEGUNDOS:
-        raise RoteiroCurto(total)  # muito curto mesmo: aí sim o roteiro é aumentado
+        raise RoteiroCurto(total, pps, n_pal)  # muito curto mesmo: aí sim o roteiro é aumentado
     log(f"  narração: {total / 60:.1f} min")
     for i, b in enumerate(blocos):
         wav = pasta / f"fala_{i:03d}.wav"
@@ -1170,6 +1184,7 @@ def processar(banco: Banco, job: dict):
     roteiro = job.get("script")
     if not roteiro or job["status"] == "refazer":
         log("  escrevendo roteiro...")
+        job["_palavras"] = palavras_alvo(banco, persona_do_canal(job.get("channel_id", ""))["voz"])
         roteiro = roteirista.escrever(job, banco)
         banco.job(jid, script=roteiro, description=roteiro.get("description"), tags=roteiro.get("tags"),
                   thumb_text=roteiro.get("thumb_text"))
@@ -1185,12 +1200,14 @@ def processar(banco: Banco, job: dict):
             shutil.rmtree(pasta, ignore_errors=True)
             if tentativa == 2:
                 raise
-            falta = int((MIN_SEGUNDOS + 30 - e.seg) * 1.9) + 60
-            log(f"  roteiro curto ({e}) — pedindo +{falta} palavras")
-            roteiro = roteirista.escrever({**job, "script": roteiro, "feedback":
-                f"The previous version was too short ({e.seg:.0f} seconds). The video MUST be at least 7 minutes. "
-                f"Keep everything that works and ADD about {falta} more words: more explanation, a short story, "
-                f"one more practical tip and more detail on each point. Return the COMPLETE new script."}, banco)
+            alvo = int((MIN_SEGUNDOS + 35) * e.pps) + 40  # total exato para ESTA voz
+            falta = max(120, alvo - e.palavras)
+            log(f"  roteiro curto ({e}) — pedindo {alvo} palavras no total (+{falta})")
+            roteiro = roteirista.escrever({**job, "script": roteiro, "_palavras": alvo, "feedback":
+                f"The previous version was too short: {e.palavras} words = {e.seg:.0f} seconds. The video MUST be 7 to 8 minutes, "
+                f"so the COMPLETE script needs AT LEAST {alvo} words of narration (add about {falta} words): more explanation, "
+                f"a short real-life story, one more practical tip and more detail on each point. Count the words. "
+                f"Return the COMPLETE new script."}, banco)
             banco.job(jid, script=roteiro, description=roteiro.get("description"), tags=roteiro.get("tags"),
                       thumb_text=roteiro.get("thumb_text"))
         finally:
