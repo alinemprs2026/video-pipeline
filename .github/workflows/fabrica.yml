@@ -15,6 +15,10 @@ jobs:
   fabrica:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        maquina: [1, 2, 3, 4]   # 4 vídeos ao mesmo tempo (cada máquina "pega" um vídeo diferente)
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -65,11 +69,11 @@ jobs:
           python rede-youtube/fabrica/fabrica.py > log.txt 2>&1
           code=$?
           curl -s -o /dev/null -X POST "$SUPABASE_URL/storage/v1/bucket" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"id":"logs","name":"logs","public":false}'
-          curl -s -o /dev/null -X POST "$SUPABASE_URL/storage/v1/object/logs/fabrica/$(date -u +%Y%m%d-%H%M)-${GITHUB_RUN_ID}.txt" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: text/plain" -H "x-upsert: true" --data-binary @log.txt
+          curl -s -o /dev/null -X POST "$SUPABASE_URL/storage/v1/object/logs/fabrica/$(date -u +%Y%m%d-%H%M)-${GITHUB_RUN_ID}-m${{ matrix.maquina }}.txt" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: text/plain" -H "x-upsert: true" --data-binary @log.txt
           echo "rodada terminou (código $code); detalhes no log privado"
           exit $code
       - name: Ainda tem fila? Emenda a próxima rodada
-        if: always()
+        if: always() && matrix.maquina == 1
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

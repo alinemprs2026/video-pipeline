@@ -726,13 +726,23 @@ def youtube_do_canal(banco: Banco, channel_id: str):
     return proxy_canal.youtube(tok)  # sem proxy: só na nuvem, pelo IP do servidor (SEM_PROXY_PELO_SERVIDOR=1)
 
 
+_URL = re.compile(r"(https?://\S+|www\.\S+|\b[\w-]+\.(?:com|net|org|io|co|info|link|site)\b\S*)", re.I)
+
+
+def sem_links(texto: str) -> str:
+    """Tira QUALQUER link que a IA tenha inventado (ex.: example.com): o único link é o nosso, rastreado."""
+    texto = _URL.sub("", texto or "")
+    texto = re.sub(r"[ \t]+\n", "\n", texto)
+    return re.sub(r"\n{3,}", "\n\n", texto).strip()
+
+
 def descricao(banco: Banco, job: dict, roteiro: dict) -> str:
     """Link no TOPO da descrição (é o que aparece antes do 'mais'), depois o texto do roteiro."""
     link = link_do_job(banco, job)
-    texto = roteiro.get("description", "")
+    texto = sem_links(roteiro.get("description", ""))
     if not link:
         return texto
-    gancho = (roteiro.get("link_hook") or "The full recipe I mentioned in the video, step by step, is here 👇").strip()
+    gancho = sem_links(roteiro.get("link_hook") or "") or "The full recipe I mentioned in the video, step by step, is here 👇"
     return (f"{gancho}\n👉 {link}\n\n{texto}\n\n"
             f"📌 Also in the first comment below and in the QR code on screen.")
 
@@ -769,7 +779,7 @@ def publicar(banco: Banco, job: dict):
         "embeddable": True, "publicStatsViewable": True}}).execute()
     link = link_do_job(banco, job)
     if link:
-        texto = ((job.get("script") or {}).get("comment") or "I left the full recipe for how to get rid of this right here 👇").strip()
+        texto = sem_links((job.get("script") or {}).get("comment") or "") or "I left the full recipe for how to get rid of this right here 👇"
         yt.commentThreads().insert(part="snippet", body={"snippet": {"videoId": job["video_id"], "topLevelComment": {
             "snippet": {"textOriginal": f"{texto}\n\n👉 {link}"}}}}).execute()
 
@@ -857,8 +867,16 @@ def main():
             log("ERRO publicando:", e)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
-    fila = fila[:MAX_POR_RODADA]
+    feitos = 0
     for job in fila:
+        if feitos >= MAX_POR_RODADA:
+            break
+        # pega o vídeo só se ninguém pegou (várias máquinas trabalham juntas)
+        r = banco.s.patch(f"{banco.url}/rest/v1/yt_jobs", params={"id": f"eq.{job['id']}", "status": f"eq.{job['status']}"},
+                          json={"status": "gerando"}, headers={"Prefer": "return=representation"}, timeout=60)
+        if not (r.ok and r.json()):
+            continue
+        feitos += 1
         log("fazendo:", job["title"])
         try:
             processar(banco, job)
