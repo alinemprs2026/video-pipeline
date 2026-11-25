@@ -77,11 +77,31 @@ NICHOS_PT = {"diabetes": "blood sugar / type 2 diabetes", "pulmao": "lungs, mucu
              "disfuncao": "men's health, erections and testosterone"}
 
 
+# o "segredo" que está na página de venda de cada nicho: a copy do vídeo tem que levar até ele
+HEROI = {
+    "diabetes": "a simple ancient morning DRINK that supports a tired pancreas and steadier blood sugar",
+    "emagrecimento": "a BAKING SODA water morning shot that calms hunger and cravings",
+    "neuropatia": "a PINK SALT trick (warm pink-salt foot soak / pink salt ritual) for tingling and numb feet",
+    "memoria": "a CINNAMON and HONEY morning ritual for memory and brain fog",
+    "pressao": "an 'arterial flush' morning DRINK ritual for healthier blood pressure",
+    "pulmao": "a simple VAPORUB steam/chest trick that helps you breathe deeper",
+    "pele": "a KOREAN GELATIN collagen routine that firms skin from the inside",
+    "queda_capilar": "a simple ROSEMARY ritual for thinning hair and shedding",
+    "disfuncao": "a natural MORNING TRICK for men's vitality, energy and prostate health",
+}
+
+
 def montar_prompt(job: dict, variante: str, feedback: str | None, oferta: str) -> str:
+    heroi = HEROI.get(job["niche_key"], "the complete natural routine")
     p = [f"You write scripts for a faceless YouTube health channel for people over 60 (niche: {NICHOS_PT.get(job['niche_key'], job['niche_key'])}).",
          f'Video title (keep the promise exactly): "{job["title"]}"',
          "Style for this channel: " + VARIANTES[variante],
-         REGRAS.format(palavras=860, oferta=oferta)]
+         REGRAS.format(palavras=860, oferta=oferta),
+         f"COPY ALIGNMENT (very important, this is what makes people buy): the full recipe behind the link is {heroi}. "
+         "Deliver what the title promises, but build the story so the viewer feels the missing piece is exactly that: "
+         "mention it (without the brand name) as the 'little-known trick' and make every call to action point to it, e.g. "
+         "\"I left the full step-by-step for the " + heroi.split(" that ")[0].replace("a ", "", 1) + " in the first comment.\" "
+         "The thumb_text must name the pain or that hero ingredient in BIG simple words (e.g. BAKING SODA?, PINK SALT TRICK, 1 SPOON OF HONEY)."]
     if feedback:
         p.append("The channel owner reviewed the previous version and asked for these changes (follow them carefully): " + feedback)
         if job.get("script"):

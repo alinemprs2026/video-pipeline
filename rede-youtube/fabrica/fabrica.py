@@ -197,6 +197,16 @@ BUSCA_NICHO = {"diabetes": "blood sugar test finger", "pulmao": "lungs anatomy",
                "neuropatia": "foot pain", "memoria": "brain glowing", "pressao": "blood pressure measurement"}
 
 
+def foto_colorida(arq: Path, minimo: float = 0.18) -> bool:
+    """True se a foto tem cor de verdade (saturação média); preto e branco/sépia dá perto de 0."""
+    try:
+        from PIL import Image, ImageStat
+        im = Image.open(arq).convert("HSV").resize((160, 160))
+        return ImageStat.Stat(im).mean[1] / 255 >= minimo
+    except Exception:
+        return True
+
+
 def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | None = None, confere: str | None = None) -> bool:
     """Foto real e grátis do Pixabay (licença livre). Reserva quando a IA de imagem está sem cota."""
     r = requests.get("https://pixabay.com/api/", params={
@@ -208,15 +218,19 @@ def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | 
     if not hits:
         return False
     if confere:  # a IA confere se a foto mostra MESMO o assunto (na ordem de relevância da busca)
-        pergunta = (f"Does this photo clearly and directly show: {confere}? It must be a realistic photo that a viewer "
-                    "instantly recognizes as that, with no text, logo or watermark. "
-                    'Reply ONLY JSON: {"ok": true/false, "problems": []}')
-        melhores = hits[:15]
+        pergunta = (f"Does this photo clearly and directly show: {confere}? It must be a realistic, vivid FULL-COLOR photo "
+                    "(NOT black-and-white, sepia or desaturated) that a viewer instantly recognizes as that, with no text, "
+                    'logo or watermark. Reply ONLY JSON: {"ok": true/false, "problems": []}')
+        melhores = hits[:20]
         random.shuffle(melhores)  # varia entre os bons resultados (não repete sempre o mesmo rosto/foto)
-        for h in melhores[:6]:
+        for h in melhores[:8]:
             if evitar is not None:
                 evitar.add(h["id"])
-            if baixar(h.get("largeImageURL") or h["webformatURL"], destino) and revisar_imagem(destino, pergunta) is not False:
+            if not baixar(h.get("largeImageURL") or h["webformatURL"], destino):
+                continue
+            if not foto_colorida(destino):  # preto e branco / sem cor: descarta antes de gastar a IA
+                continue
+            if revisar_imagem(destino, pergunta) is not False:
                 return True
         destino.unlink(missing_ok=True)
         return False
