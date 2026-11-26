@@ -142,6 +142,14 @@ def pixabay_videos(busca: str, pagina=1) -> list[dict]:
     return out
 
 
+# nunca em vídeo de saúde para 60+: criança, bebê, bicho, maquiagem, festa, esporte radical, paisagem solta
+_PROIBIDO = re.compile(r"(?<![a-z])(child|children|kid|kids|baby|babies|toddler|infant|girl|boy|teen|teenager|school|student|cat|cats|kitten|dog|dogs|puppy|pet|animal|bird|horse|lipstick|makeup|cosmetic|nail polish|party|club|beach|surf|skate|wedding|bride|fashion|model|bikini|christmas|halloween)(?![a-z])", re.I)
+
+
+def proibido(c: dict) -> bool:
+    return bool(_PROIBIDO.search(c.get("tags") or ""))
+
+
 def escolher_relevantes(fala: str, busca: str, cands: list[dict]) -> list[dict] | None:
     """A IA olha a miniatura de cada vídeo e devolve SÓ os que mostram o que está sendo dito (na ordem de melhor).
     None = não deu para conferir (sem chave/cota): aí usa a ordem da busca, mas nunca vídeo sem relação aparente."""
@@ -163,7 +171,8 @@ def escolher_relevantes(fala: str, busca: str, cands: list[dict]) -> list[dict] 
         f'Wanted B-roll: "{busca}".\n'
         "Which clips VISUALLY show something directly related to what the narration says at this moment "
         "(the same object, food, body part, symptom or situation)? Reject anything unrelated (pets, makeup, "
-        "random landscapes, sports, unrelated people) and anything childish or inappropriate. "
+        "random landscapes, sports, unrelated people), ANY child, kid, baby or teenager, any animal, makeup, parties, "
+        "and anything that does not show adults 50+ or the exact food/object/body part being talked about. "
         'Reply ONLY JSON: {"ok": [clip numbers, best first]}')})
     corpo = {"contents": [{"parts": partes}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0}}
     for modelo in MODELOS_CONFERENCIA:  # só "lite": não gasta a cota dos modelos que escrevem os roteiros
@@ -910,9 +919,10 @@ def montar(banco: "Banco", job: dict, roteiro: dict, pasta: Path, velocidade: fl
                                 break
                         if not cand:
                             continue
+                        cand = [c for c in cand if not proibido(c)]
                         escolhidos = escolher_relevantes(b["text"], q, cand)
-                        if escolhidos is None:  # sem conferência possível: só os 2 primeiros da busca específica
-                            escolhidos = cand[:2]
+                        if escolhidos is None:  # sem conferência da IA: NÃO usa nada sem conferir (repete cena já aprovada)
+                            escolhidos = []
                         bons += [c for c in escolhidos if c["id"] not in {x["id"] for x in bons}]
                         if len(bons) >= n:
                             break
@@ -1108,7 +1118,7 @@ def sem_links(texto: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", texto).strip()
 
 
-INTERVALO_MIN = (3, 5)  # minutos entre uma publicação e outra na rede inteira (sorteado)
+INTERVALO_MIN = (5, 9)  # minutos entre uma publicação e outra na rede inteira (sorteado)
 
 
 def reservar_horario(banco: Banco) -> datetime:
@@ -1152,36 +1162,43 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
         "status": {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
                    "embeddable": True, "publicStatsViewable": True},
     }
-    if publico:
-        corpo["status"]["privacyStatus"] = "public"
-    elif privado:
-        corpo["status"]["privacyStatus"] = "private"
+    # REGRA DA DONA: sobe sempre NÃO LISTADO; só fica público depois de ter thumb (verificado) e comentário com link
+    corpo["status"]["privacyStatus"] = "unlisted"
     req = yt.videos().insert(part="snippet,status", body=corpo,
                              media_body=MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
     resp = None
     while resp is None:
         _, resp = req.next_chunk()
     vid = resp["id"]
+    c = banco.get("yt_channels", channel_id=f"eq.{job['channel_id']}", select="long_uploads_status")
+    verificado = bool(c) and c[0].get("long_uploads_status") == "allowed"
     try:
-        if not SEM_PONTOS:
-            yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
+        yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(capa), mimetype="image/jpeg")).execute()
+        banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                     headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ok:{vid}", "value": "ok"})
     except Exception as e:
         log("  thumb não aplicada:", str(e)[:150])
+        if verificado:  # canal verificado SEM thumb não vai ao ar: o vídeo fica não listado e é refeito
+            raise RuntimeError(f"thumb não aplicada em canal verificado (vídeo {vid} ficou não listado): {str(e)[:200]}")
     return vid
 
 
 def publicar(banco: Banco, job: dict):
     """Deixa PÚBLICO e põe o 1º comentário com o link rastreado (fixar comentário não existe na API do YouTube)."""
-    conferir_link(banco, job)  # última conferência: nicho do canal, produto certo e página no ar
+    link = conferir_link(banco, job)  # última conferência: nicho do canal, produto certo e página no ar
     yt = youtube_do_canal(banco, job["channel_id"])
-    yt.videos().update(part="status", body={"id": job["video_id"], "status": {
-        "privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
-        "embeddable": True, "publicStatsViewable": True}}).execute()
-    link = link_do_job(banco, job)
-    if link:
+    # 1) comentário com o link ANTES de ficar público (dá para comentar em vídeo não listado) — sem isso, não publica
+    ja_tem = banco.get("app_secrets", key=f"eq.comentado:{job['video_id']}", select="key")
+    if not ja_tem:
         texto = sem_links((job.get("script") or {}).get("comment") or "") or "I left the full recipe for how to get rid of this right here 👇"
         yt.commentThreads().insert(part="snippet", body={"snippet": {"videoId": job["video_id"], "topLevelComment": {
             "snippet": {"textOriginal": comentario_com_link(texto, link)}}}}).execute()
+        banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                     headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"comentado:{job['video_id']}", "value": "ok"})
+    # 2) só agora vira público
+    yt.videos().update(part="status", body={"id": job["video_id"], "status": {
+        "privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True,
+        "embeddable": True, "publicStatsViewable": True}}).execute()
 
 
 def comentario_com_link(texto: str, link: str) -> str:
@@ -1357,12 +1374,12 @@ def publicar_devidos(banco: Banco) -> int:
 def main():
     banco = Banco()
     global SEM_PONTOS
-    SEM_PONTOS = youtube_pausado(banco)
-    if SEM_PONTOS:
-        log("pontos da cota do YouTube esgotados: subo PÚBLICO direto (envio tem cota própria); thumb e comentário depois")
-    else:
-        publicar_devidos(banco)
-        comentarios_pendentes(banco)
+    SEM_PONTOS = False  # REGRA DA DONA: nunca publica sem comentário com link e sem thumb (canal verificado)
+    if youtube_pausado(banco):
+        log("cota do YouTube esgotada: NADA é publicado até ela voltar (vídeo só sai com thumb e comentário com link)")
+        return
+    comentarios_pendentes(banco)  # primeiro: completa os que saíram sem comentário
+    publicar_devidos(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
@@ -1389,10 +1406,9 @@ def main():
             traceback.print_exc()
             msg = str(e)
             if cota_esgotada(e):
-                banco.job(job["id"], status="na_fila", error="cota do YouTube: tentando de novo no modo sem pontos")
+                banco.job(job["id"], status="na_fila", error="cota do YouTube esgotada: sai quando a cota voltar")
                 pausar_por_cota(banco)
-                SEM_PONTOS = True
-                continue
+                break
             # falha passageira (Gemini sobrecarregado, rede, proxy): volta pra fila e tenta de novo (até 6 tentativas)
             passageira = any(k in msg for k in ("Gemini não escreveu", "503", "429", "timed out", "Connection", "SOCKS", "Max retries"))
             if passageira and job.get("attempts", 0) < 6:
