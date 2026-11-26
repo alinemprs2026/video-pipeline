@@ -1178,6 +1178,13 @@ def subir(banco: Banco, job: dict, roteiro: dict, video: Path, capa: Path, publi
                      headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ok:{vid}", "value": "ok"})
     except Exception as e:
         log("  thumb não aplicada:", str(e)[:150])
+        if verificado and cota_esgotada(e):  # sem pontos agora: guarda a thumb; ela entra ANTES de ficar público
+            banco.guardar_arquivo("thumbs", f"{vid}.jpg", capa)
+            if banco.baixar_arquivo("thumbs", f"{vid}.jpg", capa.with_name("conf.jpg")):
+                banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                             headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_pendente:{vid}", "value": "ok"})
+                log("  thumb guardada: entra antes de o vídeo ficar público")
+                return vid
         if verificado:  # canal verificado SEM thumb não vai ao ar: o vídeo fica não listado e é refeito
             raise RuntimeError(f"thumb não aplicada em canal verificado (vídeo {vid} ficou não listado): {str(e)[:200]}")
     return vid
@@ -1187,6 +1194,16 @@ def publicar(banco: Banco, job: dict):
     """Deixa PÚBLICO e põe o 1º comentário com o link rastreado (fixar comentário não existe na API do YouTube)."""
     link = conferir_link(banco, job)  # última conferência: nicho do canal, produto certo e página no ar
     yt = youtube_do_canal(banco, job["channel_id"])
+    # 0) thumb que ficou guardada (canal verificado sem pontos na hora de subir) — sem ela, não publica
+    if banco.get("app_secrets", key=f"eq.thumb_pendente:{job['video_id']}", select="key"):
+        from googleapiclient.http import MediaFileUpload
+        arq = Path(tempfile.mkdtemp(prefix="tp_")) / "thumb.jpg"
+        if not banco.baixar_arquivo("thumbs", f"{job['video_id']}.jpg", arq):
+            raise RuntimeError("thumb guardada não encontrada: vídeo não vai ao ar sem thumb")
+        yt.thumbnails().set(videoId=job["video_id"], media_body=MediaFileUpload(str(arq), mimetype="image/jpeg")).execute()
+        banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                     headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"thumb_ok:{job['video_id']}", "value": "ok"})
+        banco.s.delete(f"{banco.url}/rest/v1/app_secrets", params={"key": f"eq.thumb_pendente:{job['video_id']}"}, timeout=60)
     # 1) comentário com o link ANTES de ficar público (dá para comentar em vídeo não listado) — sem isso, não publica
     ja_tem = banco.get("app_secrets", key=f"eq.comentado:{job['video_id']}", select="key")
     if not ja_tem:
@@ -1303,7 +1320,7 @@ def processar(banco: Banco, job: dict):
                          headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"comentario_pendente:{jid}", "value": vid})
             log(f"  PÚBLICO (sem pontos de cota): https://youtu.be/{vid} — comentário e thumb entram quando a cota voltar")
             return
-        ja = direto and not banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1") and pode_publicar(banco)
+        ja = direto and not youtube_pausado(banco) and not banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1") and pode_publicar(banco)
         horario = None if ja else (datetime.now(timezone.utc) if direto else None)
         log("  subindo", "PÚBLICO" if ja else ("PRIVADO (pronto — sai na vez dele, 5-9 min após o anterior)" if direto else "não listado"), "...")
         vid = subir(banco, job, roteiro, video, capa, publico=ja, privado=direto and not ja)
@@ -1375,11 +1392,12 @@ def main():
     banco = Banco()
     global SEM_PONTOS
     SEM_PONTOS = False  # REGRA DA DONA: nunca publica sem comentário com link e sem thumb (canal verificado)
-    if youtube_pausado(banco):
-        log("cota do YouTube esgotada: NADA é publicado até ela voltar (vídeo só sai com thumb e comentário com link)")
-        return
-    comentarios_pendentes(banco)  # primeiro: completa os que saíram sem comentário
-    publicar_devidos(banco)
+    pausado = youtube_pausado(banco)
+    if pausado:
+        log("cota do YouTube esgotada: os vídeos são FEITOS e ficam não listados; NADA vai ao ar até ela voltar")
+    else:
+        comentarios_pendentes(banco)  # primeiro: completa os que saíram sem comentário
+        publicar_devidos(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
@@ -1395,13 +1413,14 @@ def main():
         log("fazendo:", job["title"])
         try:  # bio do canal com o link e palavras-chave do nicho (uma vez por nicho)
             import perfil
-            if not SEM_PONTOS:
+            if not youtube_pausado(banco):
                 perfil.garantir_perfil(banco, sys.modules[__name__], job["channel_id"])
         except Exception as e:
             log("  bio não atualizada:", str(e)[:150])
         try:
             processar(banco, job)
-            publicar_devidos(banco)  # entre um vídeo e outro, publica o que venceu (1 por vez)
+            if not youtube_pausado(banco):
+                publicar_devidos(banco)  # entre um vídeo e outro, publica o que venceu (1 por vez)
         except Exception as e:
             traceback.print_exc()
             msg = str(e)
