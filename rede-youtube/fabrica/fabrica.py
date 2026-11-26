@@ -1059,8 +1059,8 @@ def refazer_thumbs(banco: "Banco", limite: int = 40) -> int:
     verificados = {c["channel_id"] for c in banco.get("yt_channels", select="channel_id", long_uploads_status="eq.allowed")}
     jobs = [j for j in banco.get("yt_jobs", status="eq.publicado", published_at=f"gte.{desde}", select="*", order="published_at")
             if j["id"] not in feitos_ok and j.get("video_id") and j["channel_id"] in verificados]
-    if youtube_pausado(banco):
-        return 0
+    if youtube_pausado(banco) or banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
+        return 0  # primeiro os vídeos prontos vão ao ar (a cota é dividida)
     trocadas = 0
     limite = min(limite, 8)  # no máximo 8 trocas por rodada (economia de cota)
     for job in jobs[:limite]:
@@ -1119,7 +1119,7 @@ def sem_links(texto: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", texto).strip()
 
 
-INTERVALO_MIN = (5, 9)  # minutos entre uma publicação e outra na rede inteira (sorteado)
+INTERVALO_MIN = (3, 5)  # minutos entre uma publicação e outra na rede inteira (sorteado)
 
 
 def reservar_horario(banco: Banco) -> datetime:
@@ -1436,8 +1436,9 @@ def main():
         log("cota do YouTube esgotada: os vídeos são FEITOS e ficam não listados; NADA vai ao ar até ela voltar")
     else:
         comentarios_pendentes(banco)  # primeiro: completa os que saíram sem comentário
-        corrigir_comentarios(banco)  # link na 1ª linha dos comentários antigos (mais views primeiro)
         publicar_devidos(banco)
+        if not banco.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
+            corrigir_comentarios(banco)  # link na 1ª linha dos antigos — só depois que os prontos foram ao ar (economia de cota)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
     feitos = 0
@@ -1499,7 +1500,7 @@ if __name__ == "__main__":
                     log("versão antiga ficou privada:", s_["value"])
                 except Exception as e:
                     log("não deixei privada:", str(e)[:120])
-        if not youtube_pausado(b):
+        if not youtube_pausado(b) and not b.get("yt_jobs", status="eq.aprovado", select="id", limit="1"):
             log("comentários com link no topo:", corrigir_comentarios(b))
         log("thumbs trocadas:", refazer_thumbs(b))
     else:
