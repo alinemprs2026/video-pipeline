@@ -230,13 +230,14 @@ def pixabay_foto(busca: str, destino: Path, pessoa: bool = False, evitar: set | 
         "safesearch": "true", "orientation": "vertical" if pessoa else "horizontal", "min_width": 1000}, timeout=30)
     if r.status_code != 200:
         return False
-    hits = [h for h in r.json().get("hits", []) if not evitar or h["id"] not in evitar]
+    # nunca bicho, criança, maquiagem etc. (atrai o público errado) — pedido da dona
+    hits = [h for h in r.json().get("hits", []) if (not evitar or h["id"] not in evitar) and not proibido(h)]
     if not hits:
         return False
     if confere:  # a IA confere se a foto mostra MESMO o assunto (na ordem de relevância da busca)
         pergunta = (f"Does this photo clearly and directly show: {confere}? It must be a realistic, vivid FULL-COLOR photo "
                     "(NOT black-and-white, sepia or desaturated) that a viewer instantly recognizes as that, with no text, "
-                    'logo or watermark. Reply ONLY JSON: {"ok": true/false, "problems": []}')
+                    'logo or watermark, and with NO animals (no dog, cat, pet), NO children and NO makeup. Reply ONLY JSON: {"ok": true/false, "problems": []}')
         melhores = hits[:20]
         random.shuffle(melhores)  # varia entre os bons resultados (não repete sempre o mesmo rosto/foto)
         for h in melhores[:8]:
@@ -1226,7 +1227,45 @@ def comentario_com_link(texto: str, link: str) -> str:
     frases = re.split(r"(?<=[.!?…👇])\s+|\n+", resto)
     resto = " ".join(f for f in frases if not re.search(r"\blink\b|👇", f, re.I)).strip()
     resto = re.sub(r"\s*\n\s*\n\s*", "\n\n", resto)
-    return f"{primeira} The full step-by-step is here 👇\n👉 {link}\n\n{resto}".strip()
+    # PEDIDO DA DONA: o link é a PRIMEIRA linha (no celular o resto do comentário fica escondido)
+    return f"👉 {link}\n{primeira}\n\n{resto}".strip()
+
+
+def corrigir_comentarios(banco: "Banco", limite: int = 15) -> int:
+    """Comentários antigos com o link lá embaixo: reescreve com o link na 1ª linha (vídeos com mais views primeiro)."""
+    feitos = {r["key"].split(":", 1)[1] for r in banco.get("app_secrets", key="like.link_topo:*", select="key")}
+    views = {v["video_id"]: v.get("views") or 0 for v in banco.get("yt_videos", select="video_id,views")}
+    jobs = [j for j in banco.get("yt_jobs", status="eq.publicado", select="*") if j.get("video_id") and j["video_id"] not in feitos]
+    jobs.sort(key=lambda j: -views.get(j["video_id"], 0))
+    n = 0
+    for job in jobs[:limite]:
+        try:
+            yt = youtube_do_canal(banco, job["channel_id"])
+            link = conferir_link(banco, job)
+            meu = job["channel_id"]
+            alvo = None
+            for t in yt.commentThreads().list(part="snippet", videoId=job["video_id"], maxResults=50).execute().get("items", []):
+                c = t["snippet"]["topLevelComment"]
+                if c["snippet"].get("authorChannelId", {}).get("value") == meu and "http" in c["snippet"].get("textOriginal", ""):
+                    alvo = c
+                    break
+            if alvo and not alvo["snippet"]["textOriginal"].startswith("👉 http"):
+                texto = sem_links((job.get("script") or {}).get("comment") or "") or "I left the full recipe for how to get rid of this right here."
+                yt.comments().update(part="snippet", body={"id": alvo["id"], "snippet": {
+                    "textOriginal": comentario_com_link(texto, link)}}).execute()
+                n += 1
+                log("  link subiu para o topo do comentário:", job["video_id"])
+            elif not alvo:
+                log("  sem comentário próprio (vai pelo pendente):", job["video_id"])
+                continue
+            banco.s.post(f"{banco.url}/rest/v1/app_secrets", params={"on_conflict": "key"}, timeout=60,
+                         headers={"Prefer": "resolution=merge-duplicates"}, json={"key": f"link_topo:{job['video_id']}", "value": "ok"})
+        except Exception as e:
+            if cota_esgotada(e):
+                pausar_por_cota(banco)
+                return n
+            log("  não corrigi comentário:", str(e)[:120])
+    return n
 
 
 def marcar_publicado(banco: Banco, job: dict):
@@ -1397,6 +1436,7 @@ def main():
         log("cota do YouTube esgotada: os vídeos são FEITOS e ficam não listados; NADA vai ao ar até ela voltar")
     else:
         comentarios_pendentes(banco)  # primeiro: completa os que saíram sem comentário
+        corrigir_comentarios(banco)  # link na 1ª linha dos comentários antigos (mais views primeiro)
         publicar_devidos(banco)
     fila = banco.get("yt_jobs", status="in.(na_fila,refazer)", select="*", order="created_at")
     random.shuffle(fila)  # ordem e horários de postagem variam todo dia
@@ -1459,6 +1499,8 @@ if __name__ == "__main__":
                     log("versão antiga ficou privada:", s_["value"])
                 except Exception as e:
                     log("não deixei privada:", str(e)[:120])
+        if not youtube_pausado(b):
+            log("comentários com link no topo:", corrigir_comentarios(b))
         log("thumbs trocadas:", refazer_thumbs(b))
     else:
         main()
